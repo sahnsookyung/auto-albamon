@@ -1,0 +1,135 @@
+{
+  "118056054": {
+    "reviewed_at": "2026-08-01",
+    "review_scope": "All posting-description images",
+    "duration": {
+      "minimum_months": 3,
+      "hard_minimum": true,
+      "summary": "Minimum 3 months",
+      "evidence": "근무기간 : 최소 3개월 (~3/29까지) / 최소 3개월 이상 근무 가능 하신분들만 지원",
+      "source": "manually reviewed posting images",
+      "status": "verified"
+    },
+    "hard_requirements": [
+      "Minimum commitment: Minimum 3 months",
+      "Complete 40 hours of weekday training over 5 days",
+      "Able to start within 2 weeks after acceptance"
+    ],
+    "certificate_requirements": [],
+    "hard_requirement_evidence": [
+      "교육시간 : 총 40시간 (11-20시, 5일) 필수진행",
+      "최대 2주 이내 출근 가능 하신분들만 지원"
+    ],
+    "certificate_note": "No job-specific certificate or licence requirement was visible; statutory social-insurance enrollment is not an applicant qualification."
+  },
+  "118017844": {
+    "reviewed_at": "2026-08-01",
+    "review_scope": "All posting-description images",
+    "duration": {
+      "minimum_months": null,
+      "hard_minimum": false,
+      "summary": "No numeric minimum; long-term availability is welcomed",
+      "evidence": "장기근무 가능하신 분 환영해요",
+      "source": "manually reviewed posting images",
+      "status": "non_numeric_preference"
+    },
+    "hard_requirements": [],
+    "certificate_requirements": [],
+    "hard_requirement_evidence": [
+      "카페 경력자 우대 / 초보자도 가능합니다",
+      "No barista certificate requirement was visible in the posting images."
+    ],
+    "certificate_note": "No barista certificate or other job-specific certificate was visible."
+  },
+  "118165971": {
+    "reviewed_at": "2026-08-01",
+    "review_scope": "Full posting-description image",
+    "duration": {
+      "minimum_months": null,
+      "hard_minimum": false,
+      "summary": "Two-day job: August 1–2",
+      "evidence": "토, 일(단기) 근무 / 08.01(토) ~ 08.02(일)",
+      "source": "manually reviewed posting image and dated detail field",
+      "status": "verified_shorter"
+    },
+    "hard_requirements": [
+      "Barista or café work experience"
+    ],
+    "certificate_requirements": [],
+    "hard_requirement_evidence": [
+      "지원자격: 바리스타 경력자 / 바리스타 또는 카페 실무 경력자",
+      "No barista certificate requirement was visible in the posting image."
+    ],
+    "certificate_note": "Experience is mandatory; a barista certificate is not listed."
+  },
+  "118152349": {
+    "reviewed_at": "2026-08-01",
+    "review_scope": "Full readable posting description",
+    "duration": {
+      "minimum_months": 1,
+      "hard_minimum": true,
+      "summary": "All August weekends (one-month commitment)",
+      "evidence": "주말 8월 토,일 주말 단기 근무 / 8/1일 근무시작 (8/15일 하루는 제외)",
+      "source": "manually reviewed posting text",
+      "status": "verified"
+    },
+    "hard_requirements": [
+      "Health certificate (보건증)"
+    ],
+    "certificate_requirements": [
+      "Health certificate (보건증)"
+    ],
+    "hard_requirement_evidence": [
+      "보건증 필수"
+    ]
+  },
+  "118197692": {
+    "reviewed_at": "2026-08-01",
+    "review_scope": "Full posting-description image and pre-application questions",
+    "duration": {
+      "minimum_months": null,
+      "hard_minimum": false,
+      "summary": "Two-day job: August 29–30",
+      "evidence": "근무기간: 8월 29일(토)~30일(일)",
+      "source": "manually reviewed posting image and dated detail field",
+      "status": "verified_shorter"
+    },
+    "hard_requirements": [
+      "Male applicant",
+      "Comfortable with possible upper-body exposure and shirt removal",
+      "Able to lie down for extended periods during ultrasound simulation"
+    ],
+    "certificate_requirements": [],
+    "hard_requirement_evidence": [
+      "Doctors use the assistant as the ultrasound-equipment simulation subject.",
+      "워크숍 프로그램에 따라 상의 탈의가 있을 수 있음 (노출이 있을 수 있어 여성 지원 불가)",
+      "장시간 누워있어야 하는 업무",
+      "Required pre-application questions ask about prior ultrasound-workshop model experience, acceptance of possible schedule changes, and height/weight."
+    ],
+    "certificate_note": "No certificate or prior model-experience requirement is stated; prior similar experience is asked about and listed as preferred."
+  },
+  "118213753": {
+    "reviewed_at": "2026-08-02",
+    "review_scope": "Posting title and full readable posting description",
+    "duration": {
+      "minimum_months": 2,
+      "hard_minimum": true,
+      "summary": "August–September weekend commitment (approximately 2 months)",
+      "evidence": "8-9월 주말미들마감)설빙 서울거여역점 빙수제조 주방 구인합니다!",
+      "source": "posting title; full readable description contains no shorter-duration option",
+      "status": "verified"
+    },
+    "hard_requirements": [
+      "Weekend availability through August and September",
+      "Foreign applicants are not accepted",
+      "Applicants for the 19:00–23:00 closing shift must be adults"
+    ],
+    "certificate_requirements": [],
+    "hard_requirement_evidence": [
+      "8-9월 주말미들마감",
+      "외국인 지원불가",
+      "마감타임은 미성년자는 야간시간이라 지원불가"
+    ],
+    "certificate_note": "No barista qualification or other job-specific certificate is required."
+  }
+}

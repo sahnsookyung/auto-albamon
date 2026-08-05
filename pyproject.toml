@@ -1,0 +1,14 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "auto-albamon"
+version = "0.1.0"
+description = "Incremental Albamon job discovery, screening, ranking, and application-message reporting"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Private" }
+
+[tool.setuptools]
+packages = ["tools"]
