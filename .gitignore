@@ -1,0 +1,16 @@
+.DS_Store
+.env
+.venv/
+__pycache__/
+*.py[cod]
+
+# Generated reports and incremental caches are local runtime data.
+artifacts/
+tools/albamon_detail_cache.json
+tools/albamon_transit_cache.json
+tools/albamon_message_cache.json
+tools/albamon_late_night_route_cache.json
+
+# Authenticated application history and personal decisions stay local.
+tools/albamon_applied_jobs.json
+tools/albamon_application_dispositions.json

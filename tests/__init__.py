@@ -1,0 +1,1 @@
+"""Auto Albamon test suite."""
