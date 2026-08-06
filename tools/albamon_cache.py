@@ -10,11 +10,20 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+try:
+    from tools.albamon_runtime import atomic_write_text
+except ModuleNotFoundError:  # Support direct execution from the repository root.
+    from albamon_runtime import atomic_write_text
+
 
 CACHE_VERSION = 1
 DEFAULT_DETAIL_CACHE_PATH = Path("artifacts/albamon/cache/details.json")
 DEFAULT_EXCLUDED_TTL_DAYS = 7
-DEFAULT_RETENTION_DAYS = 30
+DEFAULT_RETENTION_DAYS = 7
+DEFAULT_CLOSING_REFRESH_HOURS = 4
+DEFAULT_ELIGIBLE_REFRESH_HOURS = 12
+DEFAULT_APPLIED_REFRESH_HOURS = 24
+CLOSING_SOON_WINDOW_HOURS = 72
 
 FINGERPRINT_FIELDS = (
     "recruitNo",
@@ -93,6 +102,9 @@ class DetailCache:
     path: Path
     excluded_ttl_days: int = DEFAULT_EXCLUDED_TTL_DAYS
     retention_days: int = DEFAULT_RETENTION_DAYS
+    closing_refresh_hours: int = DEFAULT_CLOSING_REFRESH_HOURS
+    eligible_refresh_hours: int = DEFAULT_ELIGIBLE_REFRESH_HOURS
+    applied_refresh_hours: int = DEFAULT_APPLIED_REFRESH_HOURS
     checkpoint_every: int = 100
     entries: dict[str, dict[str, Any]] = field(default_factory=dict)
     stats: Counter[str] = field(default_factory=Counter)
@@ -105,12 +117,18 @@ class DetailCache:
         *,
         excluded_ttl_days: int = DEFAULT_EXCLUDED_TTL_DAYS,
         retention_days: int = DEFAULT_RETENTION_DAYS,
+        closing_refresh_hours: int = DEFAULT_CLOSING_REFRESH_HOURS,
+        eligible_refresh_hours: int = DEFAULT_ELIGIBLE_REFRESH_HOURS,
+        applied_refresh_hours: int = DEFAULT_APPLIED_REFRESH_HOURS,
         checkpoint_every: int = 100,
     ) -> "DetailCache":
         cache = cls(
             path=path,
             excluded_ttl_days=excluded_ttl_days,
             retention_days=retention_days,
+            closing_refresh_hours=closing_refresh_hours,
+            eligible_refresh_hours=eligible_refresh_hours,
+            applied_refresh_hours=applied_refresh_hours,
             checkpoint_every=checkpoint_every,
         )
         if not path.exists():
@@ -140,9 +158,6 @@ class DetailCache:
         observed_at = now or _now()
         if entry is not None:
             entry["last_seen_at"] = observed_at.isoformat(timespec="seconds")
-        if force_refresh:
-            self.stats["forced_refreshes"] += 1
-            return None
         if not isinstance(entry, dict):
             self.stats["new_jobs"] += 1
             return None
@@ -156,6 +171,13 @@ class DetailCache:
         fetched_at = _parse_datetime(entry.get("fetched_at"))
         if fetched_at is None:
             self.stats["expired_entries"] += 1
+            return None
+        if force_refresh:
+            self.stats["forced_refreshes"] += 1
+            return None
+        refresh_reason = self.live_refresh_reason(job, now=observed_at)
+        if refresh_reason:
+            self.stats[f"{refresh_reason}_refreshes"] += 1
             return None
         if observed_at - fetched_at > timedelta(days=self.excluded_ttl_days):
             self.stats["expired_entries"] += 1
@@ -197,23 +219,94 @@ class DetailCache:
         if isinstance(entry, dict):
             entry["classification"] = classification
 
-    def requires_live_refresh(self, recruit_no: int) -> bool:
+    def live_refresh_reason(
+        self,
+        job_or_recruit_no: dict[str, Any] | int,
+        *,
+        now: datetime | None = None,
+    ) -> str:
+        """Return the due refresh tier for an unchanged cached posting."""
+
+        job = job_or_recruit_no if isinstance(job_or_recruit_no, dict) else {}
+        recruit_no = int(
+            job.get("recruitNo")
+            if isinstance(job, dict) and job.get("recruitNo") is not None
+            else job_or_recruit_no
+        )
         entry = self.entries.get(str(recruit_no))
-        return isinstance(entry, dict) and entry.get("classification") in {
-            "eligible",
-            "applied",
-        }
+        if not isinstance(entry, dict):
+            return ""
+        fetched_at = _parse_datetime(entry.get("fetched_at"))
+        if fetched_at is None:
+            return "missing_timestamp"
+        observed_at = now or _now()
+        classification = entry.get("classification")
+        if classification == "applied":
+            return (
+                "applied"
+                if observed_at - fetched_at
+                >= timedelta(hours=self.applied_refresh_hours)
+                else ""
+            )
+        if classification != "eligible":
+            return ""
 
-    def prune(self, current_recruit_nos: set[int]) -> int:
-        """Bound cache growth while retaining recent entries for interrupted runs."""
+        closing_at = None
+        for field_name in ("closingDate", "closingAt", "closing_at"):
+            closing_at = _parse_datetime(job.get(field_name))
+            if closing_at is not None:
+                break
+        closing_soon = bool(
+            closing_at is not None
+            and observed_at <= closing_at
+            <= observed_at + timedelta(hours=CLOSING_SOON_WINDOW_HOURS)
+        )
+        refresh_hours = (
+            self.closing_refresh_hours
+            if closing_soon
+            else self.eligible_refresh_hours
+        )
+        if observed_at - fetched_at < timedelta(hours=refresh_hours):
+            return ""
+        return "closing" if closing_soon else "eligible"
 
-        cutoff = _now() - timedelta(days=self.retention_days)
+    def requires_live_refresh(
+        self,
+        job_or_recruit_no: dict[str, Any] | int,
+        *,
+        now: datetime | None = None,
+    ) -> bool:
+        return bool(self.live_refresh_reason(job_or_recruit_no, now=now))
+
+    def remove_many(self, recruit_nos: set[int], *, reason: str) -> int:
+        """Remove conclusively unusable entries without retaining stale details."""
+
+        removed = 0
+        for recruit_no in recruit_nos:
+            if self.entries.pop(str(recruit_no), None) is not None:
+                removed += 1
+        self.stats[f"removed_{reason}_entries"] += removed
+        return removed
+
+    def prune(
+        self,
+        current_recruit_nos: set[int],
+        *,
+        now: datetime | None = None,
+    ) -> int:
+        """Bound cache growth and immediately drop inactive excluded records."""
+
+        cutoff = (now or _now()) - timedelta(days=self.retention_days)
         stale_ids = []
         for recruit_no, entry in self.entries.items():
             if int(recruit_no) in current_recruit_nos:
                 continue
             last_seen = _parse_datetime(entry.get("last_seen_at"))
-            if last_seen is None or last_seen < cutoff:
+            if (
+                entry.get("classification") in {"excluded", "unknown", None}
+                or last_seen is None
+                or last_seen < cutoff
+            ):
                 stale_ids.append(recruit_no)
         for recruit_no in stale_ids:
             del self.entries[recruit_no]
@@ -227,18 +320,19 @@ class DetailCache:
             "updated_at": _now().isoformat(timespec="seconds"),
             "excluded_ttl_days": self.excluded_ttl_days,
             "retention_days": self.retention_days,
+            "closing_refresh_hours": self.closing_refresh_hours,
+            "eligible_refresh_hours": self.eligible_refresh_hours,
+            "applied_refresh_hours": self.applied_refresh_hours,
             "entry_count": len(self.entries),
             "privacy_note": (
                 "Unused contact and authentication fields are removed before caching."
             ),
             "entries": self.entries,
         }
-        temporary_path = self.path.with_suffix(self.path.suffix + ".tmp")
-        temporary_path.write_text(
+        atomic_write_text(
+            self.path,
             json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n",
-            encoding="utf-8",
         )
-        temporary_path.replace(self.path)
         self._updates_since_checkpoint = 0
 
     def metrics(self) -> dict[str, int]:
