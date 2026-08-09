@@ -4,27 +4,44 @@ import unittest
 from datetime import date
 
 from tools.albamon_jobs import (
+    application_risk_signals,
     assess_early_weekend_shift_options,
     assess_duration_requirement,
     assess_hard_requirements,
+    assess_independent_target_dates,
+    assess_late_night_compatible,
     assess_logistics_job,
     assess_saturday_and_sunday_only,
     assess_weekend_compatible,
     assess_driving_license_requirement,
+    build_record,
     build_search_payload,
     end_time_info,
     demographic_compatible,
     education_compatible,
+    extract_weekend_shift_options,
+    extract_shift_time_ranges,
     is_saturday_and_sunday_only,
     merge_job_detail_api_parts,
     normalize_enums,
     parse_next_data,
+    shift_fits_availability,
     structured_month_or_longer,
     work_term_has_ended,
 )
 
 
 class AlbamonNormalizationTests(unittest.TestCase):
+    def test_application_risk_signals_extract_compact_detail_flags(self):
+        signals = application_risk_signals(
+            {
+                "recruitTitle": "재택 업무",
+                "content": "시작 전에 회원 가입 및 얼굴 사진 제출이 필요합니다.",
+            }
+        )
+
+        self.assertEqual(["얼굴 사진", "회원 가입"], signals)
+
     def test_normalize_enums_preserves_false_and_empty_values(self):
         value = {
             "week": {
@@ -61,6 +78,157 @@ class AlbamonNormalizationTests(unittest.TestCase):
 
 
 class AlbamonScheduleTests(unittest.TestCase):
+    def test_fixed_one_day_target_date_is_independently_eligible(self):
+        options, evidence = assess_independent_target_dates(
+            {
+                "workPeriod": {"value": "5", "description": "하루(1일)"},
+                "workTermStartDate": "2026-08-17",
+                "workTermEndDate": "2026-08-17",
+            },
+            (date(2026, 8, 15), date(2026, 8, 17)),
+        )
+
+        self.assertEqual(["2026-08-17"], options)
+        self.assertIn("fixed one-day", evidence[0])
+
+    def test_multiple_target_dates_require_explicit_single_day_choice(self):
+        target_dates = (date(2026, 8, 15), date(2026, 8, 17))
+        selectable = {
+            "workPeriod": {"value": "5", "description": "하루(1일)"},
+            "content": "<p>근무일자: 8/15, 8/17 중 1일 가능</p>",
+        }
+        ambiguous = {
+            "workPeriod": {"value": "5", "description": "하루(1일)"},
+            "content": "<p>근무일자: 8/15, 8/17</p>",
+        }
+
+        options, evidence = assess_independent_target_dates(selectable, target_dates)
+
+        self.assertEqual(["2026-08-15", "2026-08-17"], options)
+        self.assertIn("choosing one date/day", evidence[-1])
+        self.assertEqual(([], []), assess_independent_target_dates(ambiguous, target_dates))
+
+    def test_required_multi_day_range_is_not_an_independent_target_date(self):
+        options = assess_independent_target_dates(
+            {
+                "workPeriod": {"value": "5", "description": "하루(1일)"},
+                "content": "근무일자 8/15~8/17, 3일 연속 근무 필수",
+            },
+            (date(2026, 8, 15), date(2026, 8, 17)),
+        )
+
+        self.assertEqual(([], []), options)
+
+    def test_application_deadline_is_not_treated_as_work_date(self):
+        options = assess_independent_target_dates(
+            {
+                "workPeriod": {"value": "5", "description": "하루(1일)"},
+                "content": "<p>지원 마감 8/15</p><p>근무일은 별도 안내</p>",
+            },
+            (date(2026, 8, 15), date(2026, 8, 17)),
+        )
+
+        self.assertEqual(([], []), options)
+
+    def test_fixed_non_target_date_overrides_incidental_target_date(self):
+        options = assess_independent_target_dates(
+            {
+                "workPeriod": {"value": "5", "description": "하루(1일)"},
+                "workTermStartDate": "2026-08-16",
+                "workTermEndDate": "2026-08-16",
+                "content": "8월 15일 인수인계 1시간, 본 근무는 8월 16일",
+            },
+            (date(2026, 8, 15), date(2026, 8, 17)),
+        )
+
+        self.assertEqual(([], []), options)
+
+    def test_payday_is_not_treated_as_work_date(self):
+        options = assess_independent_target_dates(
+            {
+                "workPeriod": {"value": "5", "description": "하루(1일)"},
+                "content": "급여일: 8월 15일",
+            },
+            (date(2026, 8, 15), date(2026, 8, 17)),
+        )
+
+        self.assertEqual(([], []), options)
+
+    def test_two_day_requirement_overrides_fixed_one_day_metadata(self):
+        options = assess_independent_target_dates(
+            {
+                "recruitTitle": "주말 2틀 모두 근무",
+                "workPeriod": {"value": "5", "description": "하루(1일)"},
+                "workTermStartDate": "2026-08-15",
+                "workTermEndDate": "2026-08-15",
+            },
+            (date(2026, 8, 15), date(2026, 8, 17)),
+        )
+
+        self.assertEqual(([], []), options)
+
+    def test_all_dates_preference_does_not_override_one_day_choice(self):
+        options, _evidence = assess_independent_target_dates(
+            {
+                "recruitTitle": "8/17 하루 단기 고객안내",
+                "workPeriod": {"value": "5", "description": "하루(1일)"},
+                "workTermStartDate": "2026-08-17",
+                "workTermEndDate": "2026-08-17",
+                "content": "하루 지원 가능 / 전 일정 가능자 우대",
+            },
+            (date(2026, 8, 15), date(2026, 8, 17)),
+        )
+
+        self.assertEqual(["2026-08-17"], options)
+
+    def test_late_night_window_accepts_only_fully_contained_shifts(self):
+        for start, end in (("19:00", "02:00"), ("21:00", "01:00"), ("00:00", "02:00")):
+            with self.subTest(start=start, end=end):
+                self.assertTrue(shift_fits_availability(start, end))
+        for start, end in (("18:59", "01:00"), ("20:00", "03:00"), ("09:00", "18:00")):
+            with self.subTest(start=start, end=end):
+                self.assertFalse(shift_fits_availability(start, end))
+
+    def test_late_night_match_accepts_seven_pm_start(self):
+        compatible, evidence = assess_late_night_compatible(
+            {"workStartTime": "19:00", "workEndTime": "23:30"}
+        )
+
+        self.assertTrue(compatible)
+        self.assertTrue(any(item.startswith("19:00~23:30") for item in evidence))
+
+    def test_late_night_match_reads_detail_options_but_ignores_breaks(self):
+        view_data = {
+            "content": (
+                "<p>근무조 A 10:00~18:00</p>"
+                "<p>근무조 B 20:00~02:00</p>"
+                "<p>휴게시간 21:00~22:00</p>"
+                "<p>점심시간 01:00~02:00</p>"
+                "<p>정산 출금제한시간 23:30~01:00</p>"
+                "<p>안주마감 00:20~00:30</p>"
+                "<p>인수인계 교육</p><p>20:30~21:30</p>"
+            )
+        }
+
+        compatible, evidence = assess_late_night_compatible(view_data)
+        ranges = extract_shift_time_ranges(view_data)
+
+        self.assertTrue(compatible)
+        self.assertTrue(any(item.startswith("20:00~02:00") for item in evidence))
+        self.assertNotIn(("21:00", "22:00", "휴게시간 21:00~22:00"), ranges)
+        self.assertEqual(
+            {("10:00", "18:00"), ("20:00", "02:00")},
+            {(start, end) for start, end, _evidence in ranges},
+        )
+
+    def test_late_night_match_uses_structured_overnight_time(self):
+        compatible, evidence = assess_late_night_compatible(
+            {"workStartTime": "22:00", "workEndTime": "02:00"}
+        )
+
+        self.assertTrue(compatible)
+        self.assertIn("structured work time", evidence[0])
+
     def test_requires_exactly_saturday_and_sunday(self):
         self.assertTrue(
             is_saturday_and_sunday_only(
@@ -216,9 +384,9 @@ class AlbamonScheduleTests(unittest.TestCase):
         compatible, basis = assess_weekend_compatible(view_data)
 
         self.assertFalse(compatible)
-        self.assertIn("does not offer both Sat and Sun", basis)
+        self.assertIn("weekday availability", basis)
 
-    def test_dated_saturday_only_event_is_not_a_full_weekend(self):
+    def test_dated_saturday_only_event_is_weekend_compatible(self):
         compatible, basis = assess_weekend_compatible(
             {
                 "recruitTitle": "주말 하객 알바",
@@ -227,8 +395,20 @@ class AlbamonScheduleTests(unittest.TestCase):
             }
         )
 
-        self.assertFalse(compatible)
-        self.assertIn("dated schedule", basis)
+        self.assertTrue(compatible)
+        self.assertIn("Saturday or Sunday", basis)
+
+    def test_explicit_sunday_only_job_is_weekend_compatible(self):
+        compatible, basis = assess_weekend_compatible(
+            {
+                "recruitTitle": "일요일 행사 운영",
+                "workDays": {"value": "50", "description": "요일협의"},
+                "content": "근무요일: 일요일 근무시간: 10:00~17:00",
+            }
+        )
+
+        self.assertTrue(compatible)
+        self.assertIn("Saturday or Sunday", basis)
 
     def test_weekday_training_and_friday_weekend_are_not_weekend_only(self):
         weekday_training = {
@@ -262,6 +442,50 @@ class AlbamonScheduleTests(unittest.TestCase):
         self.assertTrue(assess_weekend_compatible(selectable)[0])
         self.assertTrue(assess_weekend_compatible(ampersand)[0])
 
+    def test_one_day_posting_uses_selectable_weekend_slots_from_detail(self):
+        content = """
+        <p>8/15,16 (토,일) (1일가능)</p>
+        <p>07:00-14:30</p><p>10:00-17:30</p>
+        <p>13:00-20:30</p><p>14:30-22:00</p>
+        <p>고정알바모집 07:00-14:30 월-목/금토일</p>
+        <p>월~일 :1일 시급: 13,000원</p>
+        <p>주15시간 이상 근무시 시급: 15,600원(주휴포함)</p>
+        <p>신분증 또는 운전면허증 준비</p>
+        """
+        view_data = {
+            "recruitNo": 118367885,
+            "recruitTitle": "[그랜드하얏트호텔] 8/10-8/16(월-일) 주방보조",
+            "workDays": {"value": "110", "description": "주1일"},
+            "workWeek": {"value": "tue", "description": "화"},
+            "workPeriod": {"value": "5", "description": "하루(1일)"},
+            "salaryType": {"value": "A000", "description": "시급"},
+            "salary": 15600,
+            "payEtcInfo": ["협의가능", "주급가능"],
+            "content": content,
+        }
+
+        compatible, basis = assess_weekend_compatible(view_data)
+        record = build_record(
+            {"recruitNo": 118367885, "pay": "15,600원"},
+            view_data,
+            end_before="17:00",
+        )
+
+        self.assertTrue(compatible)
+        self.assertIn("selectable one-day", basis)
+        self.assertEqual(
+            [
+                "토·일 07:00-14:30",
+                "토·일 10:00-17:30",
+                "토·일 13:00-20:30",
+                "토·일 14:30-22:00",
+            ],
+            extract_weekend_shift_options(view_data),
+        )
+        self.assertEqual("13,000원", record["salary"])
+        self.assertIn("주휴 포함 조건", " ".join(record["salary_notes"]))
+        self.assertFalse(record["driving_license_required"])
+
     def test_three_or_more_days_is_not_weekend_only(self):
         compatible, basis = assess_weekend_compatible(
             {
@@ -288,7 +512,7 @@ class AlbamonScheduleTests(unittest.TestCase):
         compatible, basis = assess_weekend_compatible(view_data)
 
         self.assertFalse(compatible)
-        self.assertIn("omits Sat or Sun", basis)
+        self.assertIn("weekday availability", basis)
 
     def test_fixed_adjacent_saturday_sunday_dates_are_weekend_compatible(self):
         view_data = {
@@ -494,6 +718,7 @@ class AlbamonEligibilityTests(unittest.TestCase):
         )
 
         self.assertEqual(1, assessment.minimum_months)
+        self.assertEqual(31, assessment.minimum_days)
         self.assertTrue(assessment.hard_minimum)
         self.assertIn("31-day", assessment.summary)
 
@@ -501,7 +726,21 @@ class AlbamonEligibilityTests(unittest.TestCase):
             {"content": "근무기간: 8/1(토) ~ 8/30(일)"}
         )
         self.assertEqual(1, slash_dates.minimum_months)
+        self.assertEqual(30, slash_dates.minimum_days)
         self.assertTrue(slash_dates.hard_minimum)
+
+    def test_short_numeric_commitment_exposes_minimum_days(self):
+        two_weeks = assess_duration_requirement(
+            {"content": "근무기간: 2주"}
+        )
+        up_to_one_week = assess_duration_requirement(
+            {"content": "근무기간: 1주일 이하"}
+        )
+
+        self.assertTrue(two_weeks.hard_minimum)
+        self.assertEqual(14, two_weeks.minimum_days)
+        self.assertFalse(up_to_one_week.hard_minimum)
+        self.assertIsNone(up_to_one_week.minimum_days)
 
     def test_title_month_commitments_are_hard_minimums(self):
         exact = assess_duration_requirement(
@@ -523,6 +762,40 @@ class AlbamonEligibilityTests(unittest.TestCase):
 
         self.assertFalse(assessment.hard_minimum)
         self.assertEqual("non_numeric_requirement", assessment.status)
+
+    def test_required_long_term_application_question_is_held_out(self):
+        assessment = assess_duration_requirement(
+            {
+                "content": "주말 행사 스태프 모집",
+                "workPeriod": {"value": "30", "description": "1개월~3개월"},
+                "previousQuestion": [
+                    {
+                        "title": "매주 주말 장기적으로 근무 가능하실까요? 얼마나 가능하실까요?",
+                        "required": True,
+                    }
+                ],
+            }
+        )
+
+        self.assertFalse(assessment.hard_minimum)
+        self.assertEqual("non_numeric_requirement", assessment.status)
+        self.assertEqual("required application question", assessment.source)
+
+    def test_optional_long_term_application_question_is_not_a_requirement(self):
+        assessment = assess_duration_requirement(
+            {
+                "content": "주말 행사 스태프 모집",
+                "workPeriod": {"value": "30", "description": "1개월~3개월"},
+                "previousQuestion": [
+                    {
+                        "title": "장기적으로 근무 가능하신가요?",
+                        "required": False,
+                    }
+                ],
+            }
+        )
+
+        self.assertEqual("not_stated", assessment.status)
 
     def test_unreadable_month_bucket_remains_unverified(self):
         assessment = assess_duration_requirement(

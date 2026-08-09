@@ -39,11 +39,16 @@ except ModuleNotFoundError:  # Support direct execution from the repository root
 GENERAL_API_URL = "https://bff-general.albamon.com"
 SITE_URL = "https://www.albamon.com"
 DEFAULT_SUIT_NO = 35138482
-DEFAULT_PAGE_SIZE = 2_000
+DEFAULT_PAGE_SIZE = 5_000
 DEFAULT_WORKERS = 24
 REQUEST_TIMEOUT_SECONDS = 30
 MAX_READ_ATTEMPTS = 3
 DEFAULT_MANUAL_REVIEWS_PATH = Path(__file__).with_name("albamon_manual_reviews.json")
+LATE_NIGHT_AVAILABLE_FROM = "19:00"
+LATE_NIGHT_AVAILABLE_UNTIL = "02:00"
+LATE_NIGHT_AVAILABILITY = (
+    f"{LATE_NIGHT_AVAILABLE_FROM}~{LATE_NIGHT_AVAILABLE_UNTIL}"
+)
 
 JSON_HEADERS = {
     "Accept": "application/json",
@@ -64,6 +69,12 @@ TIME_RE = re.compile(r"^(?:[01]\d|2[0-3]):[0-5]\d$")
 WEEKDAY_SPLIT_RE = re.compile(r"\s*,\s*")
 TERM_WEEKDAY_RE = re.compile(r"\(([월화수목금토일])\)")
 FULL_KOREAN_WEEKDAY_RE = re.compile(r"([월화수목금토일])요일")
+APPLICATION_RISK_RE = re.compile(
+    r"방\s*사진|사진\s*제출|영상\s*데이터|행동\s*영상|얼굴\s*(?:촬영|사진)|"
+    r"보험|회원\s*가입|계정\s*(?:생성|대여|공유)|수수료|소개료|선입금|"
+    r"홍보\s*(?:요원|알바)|리워드|온라인\s*조사|설문\s*조사|"
+    r"리뷰\s*작성|댓글\s*작성"
+)
 WEEKDAY_NAMES = {
     "월": "mon",
     "화": "tue",
@@ -205,6 +216,7 @@ class DurationAssessment:
     evidence: str
     source: str
     status: str
+    minimum_days: int | None = None
 
 
 def read_url(
@@ -548,6 +560,356 @@ def korean_weekdays(text: Any, *, parenthesized_only: bool = False) -> set[str]:
     return {WEEKDAY_NAMES[match] for match in pattern.findall(text)}
 
 
+def detail_text_lines(value: Any) -> list[str]:
+    """Preserve useful line boundaries from an employer's HTML description."""
+
+    source = html.unescape(str(value or ""))
+    source = re.sub(
+        r"(?i)<br\s*/?>|</(?:p|div|tr|td|th|li|h[1-6]|table)\s*>",
+        "\n",
+        source,
+    )
+    source = re.sub(r"<[^>]+>", " ", source)
+    return [
+        normalized
+        for line in source.splitlines()
+        if (normalized := re.sub(r"\s+", " ", line).strip())
+    ]
+
+
+def extract_weekend_shift_options(view_data: dict[str, Any]) -> list[str]:
+    """Extract selectable Sat/Sun time ranges from detailed schedule blocks."""
+
+    lines = detail_text_lines(view_data.get("content"))
+    time_range = re.compile(
+        r"(?<!\d)([0-2]?\d:[0-5]\d\s*[~～-]\s*[0-2]?\d:[0-5]\d)(?!\d)"
+    )
+    options: list[str] = []
+    for index, line in enumerate(lines):
+        both_days = bool(
+            re.search(
+                r"(?:\(\s*토\s*[,/&·]\s*일\s*\)|"
+                r"토(?:요일)?\s*(?:-|~|～|,|/|&|·|및|과)\s*일(?:요일)?)",
+                line,
+            )
+        )
+        saturday = both_days or bool(re.search(r"\(\s*토\s*\)|토요일", line))
+        sunday = both_days or bool(re.search(r"\(\s*일\s*\)|일요일", line))
+        if not saturday and not sunday:
+            continue
+
+        block = [line]
+        for following in lines[index + 1 : index + 8]:
+            if re.search(r"\([^)]*[월화수목금토일][^)]*\)", following):
+                break
+            if time_range.search(following):
+                block.append(following)
+                continue
+            if len(block) > 1:
+                break
+        ranges = [
+            re.sub(r"\s+", "", match)
+            for match in time_range.findall(" ".join(block))
+        ]
+        label = "토·일" if both_days else "토" if saturday else "일"
+        for work_time in ranges:
+            rendered = f"{label} {work_time}"
+            if rendered not in options:
+                options.append(rendered)
+
+    combined = [option for option in options if option.startswith("토·일 ")]
+    return combined or options
+
+
+def _date_mention_pattern(target: date) -> re.Pattern[str]:
+    """Match a Korean or numeric posting-date spelling without partial days."""
+
+    year = target.year
+    month = target.month
+    day = target.day
+    return re.compile(
+        rf"(?<!\d)(?:(?:{year}\s*(?:[./-]|\uB144)\s*)?"
+        rf"0?{month}\s*(?:[./-]|\uC6D4)\s*0?{day}\s*(?:\uC77C)?)(?!\d)"
+    )
+
+
+def assess_independent_target_dates(
+    view_data: dict[str, Any], target_dates: Iterable[date]
+) -> tuple[list[str], list[str]]:
+    """Return target dates that the posting verifies can be worked alone.
+
+    A fixed one-day structured term is sufficient evidence. When a posting
+    advertises several target dates, it must also say that a single day/date
+    can be selected. Contradictory all-days requirements always win.
+    """
+
+    targets = tuple(sorted(set(target_dates)))
+    if not targets:
+        return [], []
+    work_period = view_data.get("workPeriod")
+    one_day = enum_description(work_period) == "하루(1일)" or (
+        isinstance(work_period, dict) and str(work_period.get("value") or "") == "5"
+    )
+    if not one_day:
+        return [], []
+
+    all_days_required = re.compile(
+        r"(?:양일|전\s*일|전\s*일정|모든\s*일정|전체\s*일정)"
+        r"\s*(?:모두\s*)?(?:근무|출근)\s*(?:필수)?|"
+        r"(?:2\s*(?:일|틀)|3\s*일)\s*(?:연속|모두|전일)\s*"
+        r"(?:근무|출근)(?:\s*필수)?"
+    )
+    posting_text = " ".join(
+        (
+            str(view_data.get("recruitTitle") or ""),
+            str(view_data.get("workTermDescription") or ""),
+            str(view_data.get("workWeekEtc") or ""),
+            plain_text(view_data.get("content")),
+        )
+    )
+    if all_days_required.search(posting_text):
+        return [], []
+
+    start_raw = view_data.get("workTermStartDate")
+    end_raw = view_data.get("workTermEndDate")
+    try:
+        start_date = date.fromisoformat(str(start_raw))
+        end_date = date.fromisoformat(str(end_raw))
+    except (TypeError, ValueError):
+        start_date = None
+        end_date = None
+    if start_date is not None and start_date == end_date:
+        if start_date in targets:
+            rendered = start_date.isoformat()
+            return [rendered], [f"fixed one-day structured work term: {rendered}"]
+        # A fixed structured date is authoritative; incidental dates in the
+        # description (training, handover, payday) must not override it.
+        return [], []
+
+    independent_signal = re.compile(
+        r"(?:1\s*\uC77C|\uD558\uB8E8)\s*(?:\uB9CC\s*)?(?:\uAC00\uB2A5|\uADFC\uBB34\s*\uAC00\uB2A5)|"
+        r"\uD558\uB8E8\s*\uB9CC|\uC6D0\uD558\uB294\s*\uB0A0|\uD76C\uB9DD\s*(?:\uC77C\uC790|\uB0A0\uC9DC)|"
+        r"(?:\uC77C\uC790|\uB0A0\uC9DC|\uADFC\uBB34\s*\uC77C)\s*(?:\uC120\uD0DD|\uD0DD\s*1)|"
+        r"\uC120\uD0DD\s*(?:\uC77C\uC790|\uB0A0\uC9DC)|\uC911\s*(?:1\s*\uC77C|\uD558\uB8E8)|"
+        r"\uD0DD\s*1|1\s*\uC77C\s*\uB2E8\uC704"
+    )
+    application_only = re.compile(
+        r"지원|접수|마감|면접|연락|급여\s*일|"
+        r"지급\s*일|정산\s*일|교육|인수\s*인계"
+    )
+    work_context = re.compile(
+        r"\uADFC\uBB34|\uC77C\uC815|\uD589\uC0AC|\uCD9C\uADFC|\uC791\uC5C5|\uC5C5\uBB34|\uC77C\uC790|\uB0A0\uC9DC|\uC54C\uBC14|1\s*\uC77C"
+    )
+
+    text_sources: list[tuple[str, str]] = [
+        ("title", str(view_data.get("recruitTitle") or "")),
+        ("work term", str(view_data.get("workTermDescription") or "")),
+        ("schedule note", str(view_data.get("workWeekEtc") or "")),
+    ]
+    text_sources.extend(
+        ("detail", line) for line in detail_text_lines(view_data.get("content"))
+    )
+    mentioned: dict[date, list[str]] = {target: [] for target in targets}
+    relevant_text: list[str] = []
+    for source, raw_text in text_sources:
+        text = re.sub(r"\s+", " ", raw_text).strip()
+        if not text:
+            continue
+        matched_targets = [
+            target for target in targets if _date_mention_pattern(target).search(text)
+        ]
+        if not matched_targets:
+            continue
+        if (
+            source == "detail"
+            and application_only.search(text)
+            and not work_context.search(text)
+            and not independent_signal.search(text)
+        ):
+            continue
+        relevant_text.append(text)
+        for target in matched_targets:
+            snippet = f"{source}: {text[:180]}"
+            if snippet not in mentioned[target]:
+                mentioned[target].append(snippet)
+
+    found = [target for target in targets if mentioned[target]]
+    if not found:
+        return [], []
+    combined = " ".join(relevant_text)
+    if all_days_required.search(combined):
+        return [], []
+
+    selectable = bool(independent_signal.search(combined))
+    range_between_targets = False
+    for left in targets:
+        for right in targets:
+            if left >= right:
+                continue
+            left_pattern = _date_mention_pattern(left).pattern
+            right_pattern = _date_mention_pattern(right).pattern
+            if re.search(
+                rf"{left_pattern}\s*(?:~|\uFF5E|-|\uBD80\uD130)\s*{right_pattern}",
+                combined,
+            ):
+                range_between_targets = True
+                break
+        if range_between_targets:
+            break
+    if (len(found) > 1 or range_between_targets) and not selectable:
+        return [], []
+
+    options = [target.isoformat() for target in found]
+    evidence = [
+        f"one-day posting; {snippet}"
+        for target in found
+        for snippet in mentioned[target][:1]
+    ]
+    if selectable:
+        evidence.append("posting explicitly permits choosing one date/day")
+    return options, evidence
+
+
+def _clock_text(hour: str, minute: str | None) -> str | None:
+    hour_value = int(hour)
+    minute_value = int(minute or 0)
+    if not 0 <= hour_value <= 23 or not 0 <= minute_value <= 59:
+        return None
+    return f"{hour_value:02d}:{minute_value:02d}"
+
+
+def extract_shift_time_ranges(view_data: dict[str, Any]) -> list[tuple[str, str, str]]:
+    """Extract credible advertised shift ranges, including overnight options."""
+
+    ranges: list[tuple[str, str, str]] = []
+
+    def add(start: str | None, end: str | None, evidence: str) -> None:
+        if (
+            not start
+            or not end
+            or parse_clock_minutes(start) is None
+            or parse_clock_minutes(end) is None
+        ):
+            return
+        if any(existing[:2] == (start, end) for existing in ranges):
+            return
+        value = (start, end, re.sub(r"\s+", " ", evidence).strip())
+        ranges.append(value)
+
+    structured_start = view_data.get("workStartTime")
+    structured_end = view_data.get("workEndTime")
+    add(
+        structured_start if isinstance(structured_start, str) else None,
+        structured_end if isinstance(structured_end, str) else None,
+        "structured work time",
+    )
+
+    colon_range = re.compile(
+        r"(?<!\d)([0-2]?\d)\s*:\s*([0-5]\d)\s*[~～-]\s*"
+        r"([0-2]?\d)\s*:\s*([0-5]\d)(?!\d)"
+    )
+    korean_range = re.compile(
+        r"(?<!\d)([0-2]?\d)\s*시\s*(?:(\d{1,2})\s*분)?\s*[~～-]\s*"
+        r"(?:새벽\s*)?([0-2]?\d)\s*시\s*(?:(\d{1,2})\s*분)?"
+    )
+    incidental_context = re.compile(
+        r"면접|연락|문의|접수\s*시간|출금|정산|영업\s*시간|"
+        r"안주\s*마감|주문\s*마감|라스트\s*오더|교육|인수\s*인계"
+    )
+    break_context = re.compile(r"휴게|식사\s*시간|점심\s*시간|브레이크")
+    schedule_signal = re.compile(
+        r"근무\s*(?:시간|조|타임|일정)|파트|미들|서브|평일|주말|"
+        r"[월화수목금토일]요일|(?:오픈|마감)\s*(?:조|파트|알바|근무|[-:：0-9])"
+    )
+    text_candidates = [
+        (str(view_data.get(field) or ""), str(view_data.get(field) or ""))
+        for field in (
+            "recruitTitle",
+            "workTimeDetail",
+            "workTimeOption",
+            "workTimeOpt",
+            "workWeekEtc",
+        )
+    ]
+    detail_lines = detail_text_lines(view_data.get("content"))
+    text_candidates.extend(
+        (
+            line,
+            " ".join(detail_lines[max(0, index - 2) : index + 1]),
+        )
+        for index, line in enumerate(detail_lines)
+    )
+    for raw_text, raw_context in text_candidates:
+        text = re.sub(r"\s+", " ", raw_text).strip()
+        context = re.sub(r"\s+", " ", raw_context).strip()
+        if not text or incidental_context.search(context):
+            continue
+        if break_context.search(context) and not schedule_signal.search(text):
+            continue
+        for match in colon_range.finditer(text):
+            add(
+                _clock_text(match.group(1), match.group(2)),
+                _clock_text(match.group(3), match.group(4)),
+                text[:180],
+            )
+        for match in korean_range.finditer(text):
+            add(
+                _clock_text(match.group(1), match.group(2)),
+                _clock_text(match.group(3), match.group(4)),
+                text[:180],
+            )
+    return ranges
+
+
+def shift_fits_availability(
+    start_time: str,
+    end_time: str,
+    *,
+    available_from: str = LATE_NIGHT_AVAILABLE_FROM,
+    available_until: str = LATE_NIGHT_AVAILABLE_UNTIL,
+) -> bool:
+    """Return whether a shift is wholly contained in an availability window."""
+
+    start = parse_clock_minutes(start_time)
+    end = parse_clock_minutes(end_time)
+    window_start = parse_clock_minutes(available_from)
+    window_end = parse_clock_minutes(available_until)
+    if None in (start, end, window_start, window_end):
+        return False
+    assert start is not None and end is not None
+    assert window_start is not None and window_end is not None
+    window_overnight = window_end <= window_start
+    absolute_window_end = window_end + (24 * 60 if window_overnight else 0)
+    absolute_start = start
+    if window_overnight and start < window_end:
+        absolute_start += 24 * 60
+    absolute_end = end
+    if absolute_end <= start or absolute_end < absolute_start:
+        absolute_end += 24 * 60
+    return window_start <= absolute_start < absolute_end <= absolute_window_end
+
+
+def assess_late_night_compatible(
+    view_data: dict[str, Any],
+    *,
+    available_from: str = LATE_NIGHT_AVAILABLE_FROM,
+    available_until: str = LATE_NIGHT_AVAILABLE_UNTIL,
+) -> tuple[bool, list[str]]:
+    """Find advertised shifts that fit fully inside the user's night window."""
+
+    matches = [
+        f"{start}~{end} — {evidence}"
+        for start, end, evidence in extract_shift_time_ranges(view_data)
+        if shift_fits_availability(
+            start,
+            end,
+            available_from=available_from,
+            available_until=available_until,
+        )
+    ]
+    return bool(matches), matches
+
+
 def assess_saturday_and_sunday_only(view_data: dict[str, Any]) -> tuple[bool, str]:
     """Assess the detail page, rejecting known contradictory schedule signals."""
 
@@ -606,7 +968,7 @@ def assess_saturday_and_sunday_only(view_data: dict[str, Any]) -> tuple[bool, st
 
 
 def assess_weekend_compatible(view_data: dict[str, Any]) -> tuple[bool, str]:
-    """Accept exact weekends plus negotiable schedules with a weekend option."""
+    """Accept a verified Saturday or Sunday option without requiring both days."""
 
     exact, basis = assess_saturday_and_sunday_only(view_data)
     work_days = view_data.get("workDays")
@@ -619,17 +981,42 @@ def assess_weekend_compatible(view_data: dict[str, Any]) -> tuple[bool, str]:
     content = f"{title} {description}".strip()
     weekend_text = content
     schedule_text = f"{note} {description}".strip()
+    weekend_shift_options = extract_weekend_shift_options(view_data)
+    one_day = (
+        enum_description(view_data.get("workPeriod")) == "하루(1일)"
+        or (
+            isinstance(view_data.get("workPeriod"), dict)
+            and view_data["workPeriod"].get("value") == "5"
+        )
+    )
+    selectable_one_day = bool(
+        one_day
+        and weekend_shift_options
+        and re.search(
+            r"1일\s*가능|희망\s*(?:요일|일자)|원하는\s*날|"
+            r"(?:요일|일자|근무일)\s*선택|선택\s*(?:요일|일자)",
+            content,
+        )
+    )
+    explicit_days = explicit_weekdays(view_data.get("workWeek"))
+    explicit_weekend_only = bool(
+        explicit_days
+        and set(explicit_days).issubset({"sat", "sun"})
+    )
 
     dated_schedule = re.search(
         r"(?:일정|근무\s*(?:일|일자)|행사\s*일자)\s*[:：]?"
         r"([^.!?\n]{0,100})",
         schedule_text,
     )
+    dated_days: set[str] = set()
     if dated_schedule:
-        dated_days = korean_weekdays(dated_schedule.group(1), parenthesized_only=True)
-        if dated_days and not {"sat", "sun"}.issubset(dated_days):
+        dated_days = korean_weekdays(
+            dated_schedule.group(1), parenthesized_only=True
+        )
+        if dated_days and not dated_days.intersection({"sat", "sun"}):
             return False, (
-                "dated schedule does not include both Sat and Sun: "
+                "dated schedule does not include Saturday or Sunday: "
                 + dated_schedule.group(0).strip()
             )
 
@@ -638,6 +1025,12 @@ def assess_weekend_compatible(view_data: dict[str, Any]) -> tuple[bool, str]:
     )
     term_start = view_data.get("workTermStartDate")
     term_end = view_data.get("workTermEndDate")
+    fixed_weekend_date = False
+    if isinstance(term_start, str) and term_start == term_end:
+        try:
+            fixed_weekend_date = date.fromisoformat(term_start).weekday() >= 5
+        except ValueError:
+            fixed_weekend_date = False
     if term_days == {"sat", "sun"} and isinstance(term_start, str) and isinstance(term_end, str):
         try:
             adjacent_weekend_dates = (
@@ -648,6 +1041,7 @@ def assess_weekend_compatible(view_data: dict[str, Any]) -> tuple[bool, str]:
         if adjacent_weekend_dates:
             return True, "fixed adjacent Saturday-Sunday work term"
 
+    schedule_line_days: set[str] = set()
     schedule_line_match = re.search(
         r"근무\s*요일\s*[:：]?\s*(.{1,80}?)(?=\s*근무\s*시간|"
         r"\s*복리\s*후생|\s*지원\s*조건|$)",
@@ -655,27 +1049,20 @@ def assess_weekend_compatible(view_data: dict[str, Any]) -> tuple[bool, str]:
     )
     if schedule_line_match:
         schedule_line = schedule_line_match.group(1).strip()
-        stated_days = korean_weekdays(schedule_line)
-        stated_days.update(
+        schedule_line_days = korean_weekdays(schedule_line)
+        schedule_line_days.update(
             WEEKDAY_NAMES[day]
             for day in re.findall(
                 r"(?<![가-힣\d])([월화수목금토일])(?=[,/·()\s]|$)",
                 schedule_line,
             )
         )
-        schedule_line_has_weekend_pair = bool(
-            re.search(
-                r"토(?:요일)?\s*(?:-|~|～|,|/|·|&|및|과)\s*일(?:요일)?",
-                schedule_line,
-            )
-        )
         if (
-            stated_days
-            and not {"sat", "sun"}.issubset(stated_days)
-            and not schedule_line_has_weekend_pair
+            schedule_line_days
+            and not schedule_line_days.intersection({"sat", "sun"})
         ):
             return False, (
-                "negotiable posting's schedule line does not offer both Sat and Sun: "
+                "negotiable posting's schedule line has no Saturday or Sunday: "
                 + schedule_line
             )
 
@@ -693,9 +1080,9 @@ def assess_weekend_compatible(view_data: dict[str, Any]) -> tuple[bool, str]:
                 required_named_days.group(0),
             )
         )
-        if not {"sat", "sun"}.issubset(required_days):
+        if required_days.difference({"sat", "sun"}):
             return False, (
-                "posting requires named availability that omits Sat or Sun: "
+                "posting requires named weekday availability in addition to weekend: "
                 + required_named_days.group(0).strip()
             )
 
@@ -748,6 +1135,7 @@ def assess_weekend_compatible(view_data: dict[str, Any]) -> tuple[bool, str]:
         friday_weekend_required
         and not friday_weekend_has_sat_sun_alternative
         and not friday_weekend_is_selectable
+        and not selectable_one_day
     ):
         return False, (
             "posting requires Friday in addition to Sat/Sun: "
@@ -766,14 +1154,43 @@ def assess_weekend_compatible(view_data: dict[str, Any]) -> tuple[bool, str]:
         schedule_text,
         re.IGNORECASE,
     )
-    if required_multi_day and not separate_weekend_role and not friday_weekend_is_selectable:
+    if (
+        required_multi_day
+        and not separate_weekend_role
+        and not friday_weekend_is_selectable
+        and not selectable_one_day
+    ):
         return False, (
             "posting requires a multi-day schedule beyond Sat/Sun: "
             + evidence_excerpt(schedule_text, required_multi_day)
         )
 
+    mixed_required_days = set(explicit_days).difference({"sat", "sun"}) or (
+        schedule_line_days.difference({"sat", "sun"})
+        if schedule_line_days.intersection({"sat", "sun"})
+        else set()
+    )
+    if (
+        mixed_required_days
+        and not selectable_one_day
+        and not separate_weekend_role
+        and not friday_weekend_is_selectable
+        and not fixed_weekend_date
+    ):
+        return False, "posting requires weekday availability in addition to weekend"
+
+    if selectable_one_day:
+        return True, "detail offers selectable one-day Saturday/Sunday shift slots"
     if exact:
         return True, basis
+    if explicit_weekend_only:
+        return True, "explicit Saturday or Sunday schedule"
+    if fixed_weekend_date:
+        return True, "fixed one-day Saturday or Sunday work term"
+    if term_days and term_days.issubset({"sat", "sun"}):
+        return True, "dated work term offers Saturday or Sunday"
+    if dated_days.intersection({"sat", "sun"}):
+        return True, "dated schedule offers Saturday or Sunday work"
     if not negotiable:
         return False, basis
     if re.search(r"원하는\s*날\s*출근\s*가능", note):
@@ -794,12 +1211,62 @@ def assess_weekend_compatible(view_data: dict[str, Any]) -> tuple[bool, str]:
         return True, "negotiable posting explicitly recruits a separate weekend role"
     if "주말" in title or re.search(r"매주\s*주말|주말\s*근무", content):
         return True, "negotiable schedule explicitly offers weekend work"
+    if re.search(r"(?:토|일)(?:요일)?\s*(?:하루|1일|근무|알바)", content):
+        return True, "negotiable schedule explicitly offers Saturday or Sunday"
     return False, "negotiable schedule has no verified weekend option"
 
 
 def plain_text(value: Any) -> str:
     text = re.sub(r"<[^>]+>", " ", str(value or ""))
     return re.sub(r"\s+", " ", html.unescape(text)).strip()
+
+
+def application_risk_signals(view_data: dict[str, Any]) -> list[str]:
+    """Retain compact safety flags without copying the entire description."""
+
+    text = " ".join(
+        (
+            str(view_data.get("recruitTitle") or ""),
+            plain_text(view_data.get("content")),
+        )
+    )
+    return sorted({match.group(0).strip() for match in APPLICATION_RISK_RE.finditer(text)})
+
+
+def detail_adjusted_salary(
+    search_job: dict[str, Any], view_data: dict[str, Any]
+) -> tuple[Any, list[str], str]:
+    """Use the unconditional detail rate when a headline includes weekly pay."""
+
+    displayed = search_job.get("pay") or view_data.get("salary") or ""
+    notes = string_list(view_data.get("payEtcInfo"))
+    if enum_description(view_data.get("salaryType")) != "시급":
+        return displayed, notes, ""
+    description = plain_text(view_data.get("content"))
+    base_match = re.search(
+        r"(?:1일\s*)?시급\s*[:：]?\s*([0-9][0-9,]*)\s*원",
+        description,
+    )
+    weekly_pay_match = re.search(
+        r"주\s*15\s*시간\s*이상[^.!?]{0,90}?"
+        r"시급\s*[:：]?\s*([0-9][0-9,]*)\s*원[^.!?]{0,35}?주휴",
+        description,
+    )
+    if not base_match or not weekly_pay_match:
+        return displayed, notes, ""
+    base_pay = int(base_match.group(1).replace(",", ""))
+    weekly_pay = int(weekly_pay_match.group(1).replace(",", ""))
+    structured_digits = re.sub(r"\D", "", str(view_data.get("salary") or displayed))
+    structured_pay = int(structured_digits) if structured_digits else 0
+    if not (0 < base_pay < weekly_pay and weekly_pay == structured_pay):
+        return displayed, notes, ""
+    caution = (
+        f"기본 1일 시급 {base_pay:,}원; {weekly_pay:,}원은 "
+        "주 15시간 이상 주휴 포함 조건"
+    )
+    if caution not in notes:
+        notes.append(caution)
+    return f"{base_pay:,}원", notes, evidence_excerpt(description, weekly_pay_match)
 
 
 def evidence_excerpt(text: str, match: re.Match[str], *, radius: int = 55) -> str:
@@ -839,7 +1306,7 @@ def assess_driving_license_requirement(
     """Conservatively reject explicit licences and jobs whose duty is driving."""
 
     title = str(view_data.get("recruitTitle") or "")
-    if re.search(r"운전자|발렛|대리운전", title):
+    if re.search(r"운전자|발렛|대리운전|라이더|배달\s*대행", title):
         return True, "job title requires driving/valet work"
 
     skills = string_list(view_data.get("skill"))
@@ -852,10 +1319,17 @@ def assess_driving_license_requirement(
         return True, f"job duties include {', '.join(driving_skills)}"
 
     description = plain_text(view_data.get("content"))
+    # A driver's licence is often listed as an alternative identity document,
+    # not as permission to drive for the job.
+    description_for_requirement = re.sub(
+        r"신분증\s*(?:또는|혹은|/|이나)\s*운전\s*면허(?:증)?\s*(?:준비|지참)?",
+        "",
+        description,
+    )
     license_match = re.search(
         r"운전\s*면허(?:증)?(?:\s*(?:소지|필수|보유))?|"
         r"(?:1|2)종\s*(?:보통|대형)?\s*면허",
-        description,
+        description_for_requirement,
     )
     if license_match:
         return True, f"description mentions {license_match.group(0).strip()}"
@@ -1017,7 +1491,14 @@ def assess_duration_requirement(
 
     description = plain_text(view_data.get("content"))
     title = str(view_data.get("recruitTitle") or "")
-    content = f"{title} {description}".strip()
+    required_question_text = " ".join(
+        str(question.get("title") or "").strip()
+        for question in (view_data.get("previousQuestion") or [])
+        if isinstance(question, dict)
+        and question.get("required")
+        and str(question.get("title") or "").strip()
+    )
+    content = f"{title} {description} {required_question_text}".strip()
     work_period = view_data.get("workPeriod")
     structured_label = enum_description(work_period)
 
@@ -1206,6 +1687,7 @@ def assess_duration_requirement(
                 evidence_excerpt(content, full_date_match),
                 "posting text",
                 "verified",
+                inclusive_days,
             )
 
     fixed_date_match = re.search(
@@ -1239,15 +1721,17 @@ def assess_duration_requirement(
                 evidence_excerpt(content, fixed_date_match),
                 "posting text",
                 "verified",
+                inclusive_days,
             )
         if inclusive_days > 0:
             return DurationAssessment(
                 None,
-                False,
+                True,
                 f"Fixed {inclusive_days}-day period",
                 evidence_excerpt(content, fixed_date_match),
                 "posting text",
                 "verified_shorter",
+                inclusive_days,
             )
 
     range_match = re.search(
@@ -1344,16 +1828,36 @@ def assess_duration_requirement(
         )
 
     short_match = re.search(
-        r"근무\s*기간\s*[:：]?\s*(\d+)\s*(일|주일?)(?:\s*이하)?", content
+        r"근무\s*기간\s*[:：]?\s*(\d+)\s*(일|주일?)\s*(이상|이하)?",
+        content,
     )
     if short_match:
+        count = int(short_match.group(1))
+        days = count * (7 if short_match.group(2).startswith("주") else 1)
+        upper_bound_only = short_match.group(3) == "이하"
         return DurationAssessment(
             None,
-            False,
-            f"{short_match.group(1)} {short_match.group(2)}",
+            not upper_bound_only,
+            f"{count} {short_match.group(2)}"
+            + (f" {short_match.group(3)}" if short_match.group(3) else ""),
             evidence_excerpt(content, short_match),
             "posting text",
             "verified_shorter",
+            None if upper_bound_only else days,
+        )
+
+    required_question_long_term = re.search(
+        r"(?:매주\s*주말[^.!?]{0,20})?장기(?:적으?로)?\s*근무\s*가능",
+        required_question_text,
+    )
+    if required_question_long_term:
+        return DurationAssessment(
+            None,
+            False,
+            "No numeric minimum; required application question asks for long-term availability",
+            evidence_excerpt(required_question_text, required_question_long_term),
+            "required application question",
+            "non_numeric_requirement",
         )
 
     negotiated_match = re.search(
@@ -1733,6 +2237,16 @@ def build_record(
     early_shift_evidence = assess_early_weekend_shift_options(
         view_data, threshold=end_before
     )
+    weekend_shift_options = extract_weekend_shift_options(view_data)
+    late_night_compatible, late_night_shift_options = assess_late_night_compatible(
+        view_data
+    )
+    target_date_options, target_date_option_evidence = assess_independent_target_dates(
+        view_data, (date(2026, 8, 15), date(2026, 8, 17))
+    )
+    salary, salary_notes, salary_detail_evidence = detail_adjusted_salary(
+        search_job, view_data
+    )
     weekdays = explicit_weekdays(view_data.get("workWeek"))
     weekend_only, weekend_basis = assess_saturday_and_sunday_only(view_data)
     weekend_compatible, weekend_compatible_basis = assess_weekend_compatible(view_data)
@@ -1780,6 +2294,7 @@ def build_record(
             view_data.get("workPeriod")
         ),
         "minimum_commitment_months": duration.minimum_months,
+        "minimum_commitment_days": duration.minimum_days,
         "duration_hard_minimum": duration.hard_minimum,
         "duration_requirement": duration.summary,
         "duration_evidence": duration.evidence,
@@ -1804,7 +2319,14 @@ def build_record(
         "weekend_compatible": weekend_compatible,
         "weekend_compatibility_basis": weekend_compatible_basis,
         "work_time": view_data.get("workTimeDetail")
-        or search_job.get("workingTime", ""),
+        or search_job.get("workingTime", "")
+        or " / ".join(weekend_shift_options),
+        "weekend_shift_options": weekend_shift_options,
+        "late_night_compatible": late_night_compatible,
+        "late_night_shift_options": late_night_shift_options,
+        "late_night_availability": LATE_NIGHT_AVAILABILITY,
+        "target_date_options": target_date_options,
+        "target_date_option_evidence": target_date_option_evidence,
         "work_time_option": view_data.get("workTimeOption") or "",
         "work_time_notes": view_data.get("workTimeOpt") or "",
         "work_time_negotiable": bool(view_data.get("workTimeConsult")),
@@ -1820,8 +2342,10 @@ def build_record(
         "end_time_threshold": end_before,
         "salary_type": enum_description(view_data.get("salaryType"))
         or enum_description(search_job.get("payType")),
-        "salary": search_job.get("pay") or view_data.get("salary") or "",
-        "salary_notes": string_list(view_data.get("payEtcInfo")),
+        "salary": salary,
+        "structured_salary": search_job.get("pay") or view_data.get("salary") or "",
+        "salary_notes": salary_notes,
+        "salary_detail_evidence": salary_detail_evidence,
         "employment_types": string_list(view_data.get("employmentType")),
         "parts": string_list(view_data.get("part")) or search_job.get("parts", []),
         "education": string_list(view_data.get("educationLevels")),
@@ -1858,6 +2382,7 @@ def build_record(
         "applied_date_from_public_read": search_job.get("appliedDate"),
         "one_click_apply_types": string_list(view_data.get("oneClickApplyType")),
         "pre_application_questions": view_data.get("previousQuestion") or [],
+        "application_risk_signals": application_risk_signals(view_data),
         "account_application_type": view_data.get("myApplyType"),
         "account_other_application_type": view_data.get("myEtcApplyType"),
         "external_recruit": bool(view_data.get("externalRecruit")),
@@ -1875,6 +2400,7 @@ def fetch_records(
     detail_cache: DetailCache | None = None,
     force_refresh_ids: set[int] | None = None,
     performance_metrics: dict[str, Any] | None = None,
+    persist_detail_cache: bool = True,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     jobs = list(search_jobs)
     records: list[dict[str, Any]] = []
@@ -1888,10 +2414,7 @@ def fetch_records(
         if detail_cache is not None:
             cached = detail_cache.lookup(
                 job,
-                force_refresh=(
-                    recruit_no in force_refresh_ids
-                    or detail_cache.requires_live_refresh(recruit_no)
-                ),
+                force_refresh=recruit_no in force_refresh_ids,
             )
         if cached is None:
             jobs_to_fetch.append(job)
@@ -1934,7 +2457,7 @@ def fetch_records(
                     "error": f"detail parsing failed: {exc}",
                 }
             )
-    if detail_cache is not None:
+    if detail_cache is not None and persist_detail_cache:
         detail_cache.save()
     if performance_metrics is not None:
         performance_metrics.update(fetch_metrics)
@@ -1981,6 +2504,8 @@ CSV_FIELDS = [
     "weekdays",
     "saturday_and_sunday_basis",
     "work_time",
+    "target_date_options",
+    "target_date_option_evidence",
     "start_time",
     "end_time",
     "overnight",
