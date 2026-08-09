@@ -12,10 +12,21 @@ import argparse
 import csv
 import hashlib
 import json
+import math
 import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+try:
+    from tools.albamon_runtime import atomic_text_writer, atomic_write_text
+    from tools.albamon_transit import (
+        ORIGIN as TRANSIT_ORIGIN,
+        cache_origin_matches,
+    )
+except ModuleNotFoundError:  # Support direct execution from the repository root.
+    from albamon_runtime import atomic_text_writer, atomic_write_text
+    from albamon_transit import ORIGIN as TRANSIT_ORIGIN, cache_origin_matches
 
 
 DEFAULT_INPUT = Path(
@@ -26,7 +37,7 @@ DEFAULT_DISPOSITIONS = Path("tools/albamon_application_dispositions.json")
 DEFAULT_TRANSIT_CACHE = Path("tools/albamon_transit_cache.json")
 DEFAULT_MESSAGE_CACHE = Path("artifacts/albamon/cache/application_messages.json")
 TRANSIT_CUTOFF_MINUTES = 50
-MESSAGE_RULESET_VERSION = 1
+MESSAGE_RULESET_VERSION = 6
 MESSAGE_CACHE_FIELDS = {
     "message",
     "message_origin",
@@ -43,13 +54,52 @@ PAY_PRIORITY_MODEL = {
     "sort_mode": "strict lexicographic: comparable pay descending, then transit minutes ascending",
     "ordering": [
         "comparable hourly compensation",
-        "public-transit minutes from Jamsilsaenae Station",
+        f"public-transit minutes from {TRANSIT_ORIGIN['name']}",
         "schedule certainty, duration, requirements, and application friction",
     ],
     "pay_points": "0-80; one point per KRW 100 above KRW 10,320/hour",
-    "commute_points": "0-20; scaled across routes displayed below the strict 50-minute cutoff",
+    "commute_points": "0-20; scaled across routes admitted by the applicable commute policy",
+    "commute_eligibility": (
+        "a conservative 20-minute walking-radius estimate from one of six preferred "
+        "stations for weekday evening-only jobs; otherwise 50 minutes inclusive "
+        "from home in Seoul, with pay-dependent extensions "
+        "up to 90 minutes only in Yongsan and Yeongdeungpo"
+    ),
     "tier_thresholds": {"A": 90, "B": 75, "C": 60, "D": 0},
 }
+
+BASE_COMMUTE_LIMIT_MINUTES = 50
+EVENING_STATION_AREA_LIMIT_MINUTES = 20
+EVENING_WALK_SPEED_KMH = 4.8
+EVENING_WALK_ROUTE_FACTOR = 1.2
+EVENING_STATION_COORDINATES = {
+    "역삼역": (37.500658, 127.036430),
+    "강남역": (37.497952, 127.027619),
+    "송파역": (37.499703, 127.112183),
+    "잠실역": (37.513305, 127.100129),
+    "잠실새내역": (37.511687, 127.086162),
+    "삼성역": (37.508844, 127.063160),
+}
+PREMIUM_COMMUTE_MAX_MINUTES = 90
+PREMIUM_FIRST_TIER_PAY_WON = 12_000
+PREMIUM_FIRST_TIER_MAX_PAY_WON = 15_000
+PREMIUM_FIRST_TIER_MAX_MINUTES = 80
+PREMIUM_FIRST_TIER_WON_PER_MINUTE = 100
+PREMIUM_SECOND_TIER_MAX_PAY_WON = 18_000
+PREMIUM_SECOND_TIER_WON_PER_MINUTE = 300
+SEARCH_ZONE_LABELS = {
+    "remote": "Remote · 재택",
+    "core": "Core · 강남/송파",
+    "seocho_corridor": "서초 · 방배/내방/반포/교대",
+    "east_near_core": "East near-core · 강동/성동/광진",
+    "premium_stretch": "Premium stretch · 용산/영등포",
+    "outer_seoul": "Outer Seoul",
+}
+SEOUL_DISTRICT_RE = re.compile(
+    r"(강남구|강동구|강북구|강서구|관악구|광진구|구로구|금천구|노원구|"
+    r"도봉구|동대문구|동작구|마포구|서대문구|서초구|성동구|성북구|송파구|"
+    r"양천구|영등포구|용산구|은평구|종로구|중구|중랑구)"
+)
 
 # These two headlines are not comparable at their structured salary value. The
 # employer-written detail gives the pay applicable to this weekend applicant.
@@ -93,6 +143,16 @@ PAY_COMPARISON_OVERRIDES: dict[int, dict[str, Any]] = {
         "caution": "구조화 급여가 건별이므로 제목의 총액과 근로시간을 기준으로 비교",
         "confidence_penalty": -5,
     },
+}
+
+# Albamon frequently republishes an unchanged ad under a new recruit number.
+# Keep reviewed pay facts attached to the job itself so routine reposts do not
+# silently fall back to a misleading structured salary.
+SEMANTIC_PAY_COMPARISON_OVERRIDES: dict[tuple[str, str], dict[str, Any]] = {
+    (
+        "㈜밴스마케팅",
+        "[평일 1.5 / 주말 1.8] 이태원역 인근 물티슈 배포 알바 구인",
+    ): PAY_COMPARISON_OVERRIDES[118257004],
 }
 
 
@@ -210,6 +270,8 @@ def classify_role(job: dict[str, Any]) -> str:
         )
     ):
         return "security_safety"
+    if any(token in title for token in ("판매크루", "판매 크루", "판매직")):
+        return "retail"
     if any(token in parts for token in ("결혼·연회", "이벤트·행사스텝", "전시·컨벤션")) or any(
         token in title for token in ("운영스텝", "운영요원", "박람회", "프로모터", "행사스탭")
     ):
@@ -220,6 +282,11 @@ def classify_role(job: dict[str, Any]) -> str:
         return "kitchen"
     if any(token in title for token in ("홀서빙", "홀 서빙", "홀 서비스", "연회장")) or "서빙" in parts:
         return "hall_service"
+    if any(
+        token in title
+        for token in ("모텔카운터", "모텔 카운터", "호텔프런트", "호텔 프런트", "호텔프론트", "호텔 프론트")
+    ):
+        return "front_desk"
     kitchen_signal = any(
         token in f"{title} {skills}"
         for token in ("주방", "조리", "식재료", "설거지", "세척", "베이커")
@@ -256,6 +323,11 @@ def classify_role(job: dict[str, Any]) -> str:
 
 
 def employer_priorities(job: dict[str, Any], role: str) -> list[str]:
+    title = str(job.get("title") or "")
+    if role == "front_desk" and any(
+        token in title for token in ("모텔카운터", "모텔 카운터", "호텔프런트", "호텔 프런트", "호텔프론트", "호텔 프론트")
+    ):
+        return ["카운터 고객 응대", "입·퇴실 및 예약 확인", "야간 인수인계"]
     duties = [
         str(value).strip()
         for value in job.get("skills") or []
@@ -263,7 +335,8 @@ def employer_priorities(job: dict[str, Any], role: str) -> list[str]:
     ]
     if duties:
         return duties[:4]
-    title = str(job.get("title") or "")
+    if "오픈런" in title:
+        return ["집합시간 준수", "대기 순서·위치 준수", "현장 담당자 지시 이행"]
     if role == "event":
         if any(token in title for token in ("박람회", "전시", "문화")):
             return ["접수·입장 안내", "부스·프로그램 안내", "관람 동선 정리"]
@@ -383,6 +456,30 @@ def role_spec(job: dict[str, Any]) -> tuple[str, list[str]]:
     return pitch, facts
 
 
+def required_application_questions(job: dict[str, Any]) -> list[str]:
+    """Return mandatory screening prompts that must be answered before applying."""
+
+    questions: list[str] = []
+    for item in job.get("pre_application_questions") or []:
+        if not isinstance(item, dict) or not item.get("required"):
+            continue
+        title = " ".join(str(item.get("title") or "").split())
+        if title and title not in questions:
+            questions.append(title)
+    return questions
+
+
+def report_hard_requirements(job: dict[str, Any]) -> list[str]:
+    """Keep posting requirements and mandatory application prompts together."""
+
+    requirements = [str(value) for value in job.get("hard_requirements") or []]
+    for question in required_application_questions(job):
+        requirement = f"지원서 필수 질문: {question}"
+        if requirement not in requirements:
+            requirements.append(requirement)
+    return requirements
+
+
 def requirements_for_message(job: dict[str, Any], role: str) -> tuple[list[str], str, str]:
     requirements = [str(value) for value in job.get("hard_requirements") or []]
     verify: list[str] = []
@@ -404,6 +501,11 @@ def requirements_for_message(job: dict[str, Any], role: str) -> tuple[list[str],
         else:
             verify.append(f"하드 요건 충족 여부: {requirement}")
             unsatisfied.append(requirement)
+    for question in required_application_questions(job):
+        verify.append(f"지원서 필수 질문 확인: {question}")
+        if "정장" in question and "소지" in question:
+            optional = "검은색 또는 다크네이비 정장을 보유하고 있습니다."
+            unsatisfied.append("검은색 또는 다크네이비 정장 보유 여부")
     warning = (
         "지원 전 사실 확인이 필요한 하드 요건: " + "; ".join(unsatisfied)
         if unsatisfied
@@ -538,6 +640,11 @@ def load_transit_cache(path: Path | None) -> dict[int, dict[str, Any]]:
     if path is None or not path.exists():
         return {}
     payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict) or not cache_origin_matches(payload):
+        raise ValueError(
+            "transit cache was measured from a different origin; "
+            "refresh routes before building application messages"
+        )
     raw_jobs = payload.get("jobs") if isinstance(payload, dict) else None
     if not isinstance(raw_jobs, dict):
         raise ValueError("transit cache must contain a jobs object")
@@ -584,6 +691,12 @@ def comparable_hourly_pay(record: dict[str, Any]) -> dict[str, Any]:
 
     recruit_no = int(record.get("recruit_no") or 0)
     override = PAY_COMPARISON_OVERRIDES.get(recruit_no)
+    if not override:
+        semantic_key = (
+            " ".join(str(record.get("company") or "").split()),
+            " ".join(str(record.get("title") or "").split()),
+        )
+        override = SEMANTIC_PAY_COMPARISON_OVERRIDES.get(semantic_key)
     if override:
         return dict(override)
     amount = numeric_pay(record)
@@ -629,6 +742,241 @@ def comparable_hourly_pay(record: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def classify_search_zone(record: dict[str, Any]) -> tuple[str, str]:
+    """Group Seoul jobs into practical search zones from verified job text."""
+
+    if record.get("remote_job") or "remote_short_term" in (
+        record.get("eligibility_lanes") or []
+    ):
+        return "remote", SEARCH_ZONE_LABELS["remote"]
+    district = str(record.get("target_district") or "").strip()
+    location_text = " ".join(
+        [district]
+        + [
+            str(record.get(field) or "")
+            for field in ("area", "working_address", "title")
+        ]
+    )
+    match = SEOUL_DISTRICT_RE.search(location_text)
+    if match:
+        district = match.group(1)
+    if district in {"강남구", "송파구"}:
+        zone = "core"
+    elif district == "서초구":
+        zone = "seocho_corridor"
+    elif district in {"강동구", "성동구", "광진구"}:
+        zone = "east_near_core"
+    elif district in {"용산구", "영등포구"}:
+        zone = "premium_stretch"
+    else:
+        zone = "outer_seoul"
+    return zone, SEARCH_ZONE_LABELS[zone]
+
+
+def _seoul_coordinates(*sources: dict[str, Any]) -> tuple[float, float] | None:
+    for source in sources:
+        try:
+            latitude = float(source.get("latitude"))
+            longitude = float(source.get("longitude"))
+        except (TypeError, ValueError):
+            continue
+        if 37.3 <= latitude <= 37.75 and 126.75 <= longitude <= 127.25:
+            return latitude, longitude
+    return None
+
+
+def _haversine_km(
+    first: tuple[float, float], second: tuple[float, float]
+) -> float:
+    first_latitude, first_longitude = map(math.radians, first)
+    second_latitude, second_longitude = map(math.radians, second)
+    latitude_delta = second_latitude - first_latitude
+    longitude_delta = second_longitude - first_longitude
+    haversine = (
+        math.sin(latitude_delta / 2) ** 2
+        + math.cos(first_latitude)
+        * math.cos(second_latitude)
+        * math.sin(longitude_delta / 2) ** 2
+    )
+    return 6_371.0088 * 2 * math.asin(min(1.0, math.sqrt(haversine)))
+
+
+def evening_station_proximity(
+    record: dict[str, Any], transit: dict[str, Any]
+) -> dict[str, Any]:
+    """Estimate a conservative walk from the worksite to the nearest target station."""
+
+    coordinates = _seoul_coordinates(transit, record)
+    if coordinates is None:
+        return {
+            "evening_station_area_status": "unverified",
+            "evening_station_area_eligible": False,
+            "evening_station_area_limit_minutes": EVENING_STATION_AREA_LIMIT_MINUTES,
+            "evening_nearest_station": "",
+            "evening_station_distance_km": None,
+            "evening_station_walk_minutes": None,
+            "evening_station_area_basis": (
+                "worksite coordinates unavailable; station-area proximity requires "
+                "WebUI verification"
+            ),
+        }
+    nearest_station, direct_distance_km = min(
+        (
+            (station, _haversine_km(coordinates, station_coordinates))
+            for station, station_coordinates in EVENING_STATION_COORDINATES.items()
+        ),
+        key=lambda item: item[1],
+    )
+    estimated_route_km = direct_distance_km * EVENING_WALK_ROUTE_FACTOR
+    walking_minutes = math.ceil(
+        estimated_route_km / EVENING_WALK_SPEED_KMH * 60
+    )
+    eligible = walking_minutes <= EVENING_STATION_AREA_LIMIT_MINUTES
+    return {
+        "evening_station_area_status": "estimated",
+        "evening_station_area_eligible": eligible,
+        "evening_station_area_limit_minutes": EVENING_STATION_AREA_LIMIT_MINUTES,
+        "evening_nearest_station": nearest_station,
+        "evening_station_distance_km": round(direct_distance_km, 2),
+        "evening_station_walk_minutes": walking_minutes,
+        "evening_station_area_basis": (
+            f"{nearest_station} 직선 {direct_distance_km:.2f}km에 보행 우회계수 "
+            f"{EVENING_WALK_ROUTE_FACTOR:.1f} 적용: 약 {walking_minutes}분"
+        ),
+    }
+
+
+def commute_policy_for_job(
+    record: dict[str, Any],
+    transit: dict[str, Any],
+    *,
+    hourly_pay: int | None = None,
+) -> dict[str, Any]:
+    """Apply the evening, base, or premium-district inclusive commute cutoff."""
+
+    zone, zone_label = classify_search_zone(record)
+    if zone == "remote":
+        return {
+            "search_zone": zone,
+            "search_zone_label": zone_label,
+            "commute_limit_minutes": 0,
+            "commute_extension_minutes": 0,
+            "commute_policy_reason": "Remote work: no commute required",
+            "commute_policy_eligible": True,
+            "pay_adjusted_commute": False,
+            "distance_excluded": False,
+            "distance_exclusion_reason": "",
+            "evening_station_area_status": "not_applicable",
+            "evening_station_area_eligible": None,
+            "evening_station_area_limit_minutes": None,
+            "evening_nearest_station": "",
+            "evening_station_distance_km": None,
+            "evening_station_walk_minutes": None,
+            "evening_station_area_basis": "",
+        }
+    lanes = set(record.get("eligibility_lanes") or [])
+    evening_only = (
+        "songpa_late_night" in lanes and "weekend_short_term" not in lanes
+    )
+    limit = BASE_COMMUTE_LIMIT_MINUTES
+    reliable_hourly_pay = max(0, int(hourly_pay or 0))
+    if not evening_only and zone == "premium_stretch":
+        if reliable_hourly_pay >= PREMIUM_SECOND_TIER_MAX_PAY_WON:
+            limit = PREMIUM_COMMUTE_MAX_MINUTES
+        elif reliable_hourly_pay >= PREMIUM_FIRST_TIER_MAX_PAY_WON:
+            limit = min(
+                PREMIUM_COMMUTE_MAX_MINUTES,
+                PREMIUM_FIRST_TIER_MAX_MINUTES
+                + (
+                    reliable_hourly_pay - PREMIUM_FIRST_TIER_MAX_PAY_WON
+                )
+                // PREMIUM_SECOND_TIER_WON_PER_MINUTE,
+            )
+        elif reliable_hourly_pay >= PREMIUM_FIRST_TIER_PAY_WON:
+            limit = min(
+                PREMIUM_FIRST_TIER_MAX_MINUTES,
+                BASE_COMMUTE_LIMIT_MINUTES
+                + (reliable_hourly_pay - PREMIUM_FIRST_TIER_PAY_WON)
+                // PREMIUM_FIRST_TIER_WON_PER_MINUTE,
+            )
+
+    minutes = transit.get("transit_minutes")
+    route_verified = (
+        transit.get("route_status") == "verified" and isinstance(minutes, int)
+    )
+    if route_verified:
+        commute_excluded = int(minutes) > limit
+    else:
+        commute_excluded = bool(transit.get("distance_excluded"))
+    station_proximity = (
+        evening_station_proximity(record, transit)
+        if evening_only
+        else {
+            "evening_station_area_status": "not_applicable",
+            "evening_station_area_eligible": None,
+            "evening_station_area_limit_minutes": None,
+            "evening_nearest_station": "",
+            "evening_station_distance_km": None,
+            "evening_station_walk_minutes": None,
+            "evening_station_area_basis": "",
+        }
+    )
+    station_area_excluded = bool(
+        evening_only and not station_proximity["evening_station_area_eligible"]
+    )
+    distance_excluded = commute_excluded or station_area_excluded
+    pay_adjusted_commute = bool(
+        route_verified
+        and BASE_COMMUTE_LIMIT_MINUTES < int(minutes) <= limit
+        and limit > BASE_COMMUTE_LIMIT_MINUTES
+    )
+    if evening_only:
+        policy_reason = (
+            "Evening station-area rule: estimated walk up to "
+            f"{EVENING_STATION_AREA_LIMIT_MINUTES} min from 역삼·강남·송파·잠실·"
+            f"잠실새내·삼성, plus home commute up to {limit} min"
+        )
+    elif zone == "premium_stretch" and limit > BASE_COMMUTE_LIMIT_MINUTES:
+        policy_reason = (
+            f"Premium commute limit: {limit} min inclusive at reliable comparable "
+            f"hourly pay {reliable_hourly_pay:,} won"
+        )
+    else:
+        policy_reason = f"Standard commute limit: {limit} min inclusive"
+    exclusion_reason = str(transit.get("distance_exclusion_reason") or "")
+    if station_area_excluded:
+        if station_proximity["evening_station_area_status"] == "unverified":
+            exclusion_reason = (
+                "선호 역세권 20분 범위를 검증할 근무지 좌표가 없어 WebUI 확인 필요"
+            )
+        else:
+            exclusion_reason = (
+                f"가장 가까운 {station_proximity['evening_nearest_station']}까지 "
+                f"보수적 도보 추정 {station_proximity['evening_station_walk_minutes']}분으로 "
+                f"{EVENING_STATION_AREA_LIMIT_MINUTES}분 이하 역세권 기준 미충족"
+            )
+    elif route_verified:
+        if commute_excluded:
+            exclusion_reason = (
+                f"{TRANSIT_ORIGIN['name']}에서 대중교통 최단 {minutes}분으로 "
+                f"{limit}분 이하 기준 미충족"
+            )
+        else:
+            exclusion_reason = ""
+    return {
+        "search_zone": zone,
+        "search_zone_label": zone_label,
+        "commute_limit_minutes": limit,
+        "commute_extension_minutes": max(0, limit - BASE_COMMUTE_LIMIT_MINUTES),
+        "commute_policy_reason": policy_reason,
+        "commute_policy_eligible": not distance_excluded,
+        "pay_adjusted_commute": pay_adjusted_commute,
+        "distance_excluded": distance_excluded,
+        "distance_exclusion_reason": exclusion_reason,
+        **station_proximity,
+    }
+
+
 def assess_application_priority(
     record: dict[str, Any],
 ) -> tuple[int, str, list[str], list[str], dict[str, Any]]:
@@ -638,7 +986,14 @@ def assess_application_priority(
     hourly = int(pay["hourly_equivalent"])
     pay_points = max(0, min(80, round((hourly - 10_320) / 100)))
     minutes = record.get("transit_minutes")
+    remote_job = bool(
+        record.get("remote_job")
+        or "remote_short_term" in (record.get("eligibility_lanes") or [])
+    )
     commute_points = (
+        20
+        if remote_job
+        else
         max(
             0,
             min(
@@ -653,12 +1008,19 @@ def assess_application_priority(
     reasons = [
         f"{pay_points:+d} 급여 우선점수: 환산 시급 약 {hourly:,}원 ({pay['basis']})",
         (
-            f"{commute_points:+d} 통근 우선점수: 잠실새내역에서 대중교통 {minutes}분"
+            f"{commute_points:+d} 통근 우선점수: 재택근무로 통근 없음"
+            if remote_job
+            else f"{commute_points:+d} 통근 우선점수: "
+            f"{TRANSIT_ORIGIN['name']}에서 대중교통 {minutes}분"
             if isinstance(minutes, int)
             else "+0 통근 우선점수: 실제 근무지 기준 미검증"
         ),
     ]
     cautions: list[str] = []
+    if record.get("pay_adjusted_commute"):
+        cautions.append(
+            f"급여 조정 통근 허용: {minutes}분 / {record.get('commute_limit_minutes')}분 이하"
+        )
     if pay.get("caution"):
         cautions.append(str(pay["caution"]))
 
@@ -668,14 +1030,29 @@ def assess_application_priority(
         rendered = f"{points:+d} {label}"
         (cautions if caution else reasons).append(rendered)
 
-    weekend_basis = str(record.get("weekend_compatibility_basis") or "")
-    weekend_explicit = (
-        weekend_basis.startswith("weekend") or weekend_basis == "explicit weekdays"
-    )
-    fit_adjust(
-        4 if weekend_explicit else 1,
-        "토·일 일정 명시" if weekend_explicit else "주말 협의 가능",
-    )
+    eligibility_lanes = set(record.get("eligibility_lanes") or [])
+    if (
+        "songpa_late_night" in eligibility_lanes
+        and "weekend_short_term" not in eligibility_lanes
+    ):
+        fit_adjust(4, "역삼·강남·송파·잠실·잠실새내·삼성권 19:00~02:00 근무조 명시")
+        cautions.append("02:00 퇴근 시 귀가 교통수단 별도 확인 필요")
+    elif (
+        "aug_15_17_single_day" in eligibility_lanes
+        and "weekend_short_term" not in eligibility_lanes
+    ):
+        dates = ", ".join(record.get("target_date_options") or [])
+        fit_adjust(4, f"{dates} 중 1일 독립 근무 가능 확인")
+    else:
+        weekend_basis = str(record.get("weekend_compatibility_basis") or "")
+        weekend_explicit = (
+            weekend_basis.startswith("weekend")
+            or weekend_basis == "explicit weekdays"
+        )
+        fit_adjust(
+            4 if weekend_explicit else 1,
+            "토·일 일정 명시" if weekend_explicit else "주말 협의 가능",
+        )
     duration_status = str(record.get("duration_review_status") or "")
     duration_adjustments = {
         "verified_shorter": (4, "1개월 미만 근무기간 확인", False),
@@ -765,8 +1142,15 @@ def application_message_fingerprint(job: dict[str, Any]) -> str:
         "work_days",
         "work_time",
         "work_time_option",
+        "eligibility_lanes",
+        "remote_job",
+        "target_date_options",
+        "late_night_shift_options",
+        "late_night_availability",
+        "availability_end_date",
         "duration_requirement",
         "application_methods",
+        "pre_application_questions",
         "logistics_category",
         "cold_storage_status",
     )
@@ -812,12 +1196,10 @@ def write_message_cache(path: Path, records: list[dict[str, Any]]) -> None:
             for record in records
         },
     }
-    temporary_path = path.with_suffix(path.suffix + ".tmp")
-    temporary_path.write_text(
+    atomic_write_text(
+        path,
         json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n",
-        encoding="utf-8",
     )
-    temporary_path.replace(path)
 
 
 def build_records(
@@ -852,12 +1234,18 @@ def build_records(
         ):
             cached_content = None
         transit = transit_cache.get(recruit_no) or {}
-        distance_excluded = bool(transit.get("distance_excluded"))
+        pay = comparable_hourly_pay(job)
+        commute_policy = commute_policy_for_job(
+            job,
+            transit,
+            hourly_pay=int(pay["hourly_equivalent"]),
+        )
+        distance_excluded = bool(commute_policy["distance_excluded"])
         if cached_content is not None:
             cache_hits += 1
             message_fields = cached_content
             role_family = str(message_fields["role_family"])
-            profile_mismatch = str(message_fields["fit_warning"])
+            profile_mismatch = known_profile_mismatch(job, role_family)
         else:
             cache_misses += 1
             if job.get("report_section") == "logistics":
@@ -899,6 +1287,62 @@ def build_records(
                 "optional_sentence_if_true": item["optional_sentence"],
                 "fit_warning": item["fit_warning"],
             }
+        message_fields = {
+            **message_fields,
+            "verify_before_sending": list(
+                message_fields.get("verify_before_sending") or []
+            ),
+        }
+        availability_end_date = str(job.get("availability_end_date") or "")
+        if availability_end_date:
+            availability_check = (
+                f"필수 근무가 {availability_end_date}까지 종료되는지 최종 확인"
+            )
+            if availability_check not in message_fields["verify_before_sending"]:
+                message_fields["verify_before_sending"].append(availability_check)
+        is_remote = bool(
+            job.get("remote_job")
+            or "remote_short_term" in (job.get("eligibility_lanes") or [])
+        )
+        if is_remote:
+            for remote_check in (
+                "시급 적용 업무 범위·실근로시간·지급일 확인",
+                "선입금·회원가입·계정공유·과도한 사진/영상 제출 요구가 없는지 확인",
+            ):
+                if remote_check not in message_fields["verify_before_sending"]:
+                    message_fields["verify_before_sending"].append(remote_check)
+        is_late_night = "songpa_late_night" in (job.get("eligibility_lanes") or [])
+        late_night_journeys = (
+            transit.get("late_night_shift_journeys") or []
+            if is_late_night
+            else []
+        )
+        if is_late_night:
+            has_future_time_route = any(
+                leg.get("mode") == "public_transit_future_time"
+                for journey in late_night_journeys
+                for leg in (
+                    journey.get("outbound") or {},
+                    journey.get("return") or {},
+                )
+            )
+            night_transport_check = (
+                "Naver 미래시간 경로를 실제 근무일에 재확인하고 자전거 귀가 가능 여부 확인"
+                if has_future_time_route
+                else (
+                    "근무 당일 심야 버스 운행과 자전거 귀가 교통수단 가능 여부"
+                    if late_night_journeys
+                    else "실제 퇴근 시간의 귀가 교통수단"
+                )
+            )
+            if night_transport_check not in message_fields["verify_before_sending"]:
+                message_fields["verify_before_sending"].append(
+                    night_transport_check
+                )
+        if transit.get("route_cache_stale"):
+            stale_route_check = "오래된 Kakao 통근 경로를 출발 전 재확인"
+            if stale_route_check not in message_fields["verify_before_sending"]:
+                message_fields["verify_before_sending"].append(stale_route_check)
         user_disposition = dispositions.get(recruit_no) or {}
         application_disposition = (
             "applied"
@@ -927,9 +1371,40 @@ def build_records(
                 "transit_transfers": transit.get("transfers"),
                 "transit_vehicles": transit.get("vehicles") or [],
                 "transit_route_url": str(transit.get("landing_url") or ""),
-                "distance_exclusion_reason": str(
-                    transit.get("distance_exclusion_reason") or ""
+                "transit_route_stale": bool(transit.get("route_cache_stale")),
+                "late_night_route_checked_at": str(
+                    transit.get("late_night_route_checked_at") or ""
                 ),
+                "late_night_route_time_policy": str(
+                    transit.get("late_night_route_time_policy") or ""
+                ),
+                "late_night_shift_journeys": late_night_journeys,
+                "return_bicycle_minutes": transit.get("return_bicycle_minutes"),
+                "return_bicycle_distance_km": transit.get(
+                    "return_bicycle_distance_km"
+                ),
+                "distance_exclusion_reason": commute_policy[
+                    "distance_exclusion_reason"
+                ],
+                **{
+                    key: commute_policy[key]
+                    for key in (
+                        "search_zone",
+                        "search_zone_label",
+                        "commute_limit_minutes",
+                        "commute_extension_minutes",
+                        "commute_policy_reason",
+                        "commute_policy_eligible",
+                        "pay_adjusted_commute",
+                        "evening_station_area_status",
+                        "evening_station_area_eligible",
+                        "evening_station_area_limit_minutes",
+                        "evening_nearest_station",
+                        "evening_station_distance_km",
+                        "evening_station_walk_minutes",
+                        "evening_station_area_basis",
+                    )
+                },
                 "applied_at": job.get("applied_at") or "",
                 "applied_method": job.get("applied_method") or "",
                 "application_read_status": job.get("application_read_status") or "",
@@ -946,15 +1421,29 @@ def build_records(
                 "work_days": job["work_days"],
                 "work_time": job["work_time"],
                 "work_time_option": job.get("work_time_option") or "",
+                "weekend_shift_options": job.get("weekend_shift_options") or [],
+                "eligibility_lanes": job.get("eligibility_lanes") or [],
+                "remote_job": is_remote,
+                "target_date_options": job.get("target_date_options") or [],
+                "target_date_option_evidence": job.get("target_date_option_evidence") or [],
+                "late_night_shift_options": job.get("late_night_shift_options") or [],
+                "late_night_availability": job.get("late_night_availability") or "",
                 "salary_type": job["salary_type"],
                 "salary": job["salary"],
                 "salary_notes": job.get("salary_notes") or [],
                 "duration_requirement": job.get("duration_requirement") or "",
                 "duration_review_status": job.get("duration_review_status") or "",
+                "work_term_start": job.get("work_term_start") or "",
+                "work_term_end": job.get("work_term_end") or "",
+                "minimum_commitment_days": job.get("minimum_commitment_days"),
+                "availability_window_start_date": job.get("availability_window_start_date") or "",
+                "availability_end_date": availability_end_date,
+                "availability_window_days": job.get("availability_window_days"),
+                "availability_compatibility_basis": job.get("availability_compatibility_basis") or "",
                 "weekend_compatibility_basis": job.get("weekend_compatibility_basis") or "",
                 "logistics_category": job.get("logistics_category") or "",
                 "application_methods": job["application_methods"],
-                "hard_requirements": job["hard_requirements"],
+                "hard_requirements": report_hard_requirements(job),
                 "certificate_requirements": job.get("certificate_requirements") or [],
                 "message_fingerprint": message_fingerprint,
                 **message_fields,
@@ -981,10 +1470,27 @@ def build_records(
     return records
 
 
-def write_json(path: Path, source: Path, records: list[dict[str, Any]]) -> None:
+def write_json(
+    path: Path,
+    source: Path,
+    records: list[dict[str, Any]],
+    *,
+    source_report: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     payload = {
         "generated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
         "source_report": str(source),
+        **(
+            {"source_run_id": str(source_report["run_id"])}
+            if source_report and source_report.get("run_id")
+            else {}
+        ),
+        **(
+            {"source_generated_at": str(source_report["generated_at"])}
+            if source_report and source_report.get("generated_at")
+            else {}
+        ),
+        "origin": TRANSIT_ORIGIN,
         "privacy_note": (
             "Only job-relevant facts are retained; contact details, exact address, "
             "birth date, and resume identifiers are excluded."
@@ -1017,7 +1523,65 @@ def write_json(path: Path, source: Path, records: list[dict[str, Any]]) -> None:
         ),
         "jobs": records,
     }
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    atomic_write_text(path, json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
+    return payload
+
+
+def render_late_night_journeys(record: dict[str, Any]) -> list[str]:
+    """Render exact shift-time commute choices and their verification basis."""
+
+    def short_time(value: Any) -> str:
+        text = str(value or "")
+        return text[5:16].replace("T", " ") if len(text) >= 16 else text
+
+    rendered: list[str] = []
+    for journey in record.get("late_night_shift_journeys") or []:
+        outbound = journey.get("outbound") or {}
+        return_route = journey.get("return") or {}
+        bicycle = journey.get("bicycle_fallback") or {}
+        mode = return_route.get("mode")
+        if mode == "public_transit_future_time":
+            vehicles = ", ".join(return_route.get("vehicles") or ["대중교통"])
+            return_text = (
+                f"귀가 Naver 미래시간 {return_route.get('minutes')}분/{vehicles} "
+                f"({short_time(return_route.get('departure_at'))}→"
+                f"{short_time(return_route.get('arrival_at'))}, 실제 근무일 재확인)"
+            )
+        elif mode == "night_bus_pattern":
+            vehicles = ", ".join(return_route.get("vehicles") or ["심야 버스"])
+            return_text = (
+                f"귀가 {vehicles} 경로 {return_route.get('minutes')}분"
+                "(당일 운행 확인)"
+            )
+        elif mode == "public_transit_pattern":
+            return_text = (
+                f"귀가 대중교통 경로 {return_route.get('minutes')}분"
+                "(당일 운행 확인)"
+            )
+        else:
+            return_text = (
+                f"귀가 자전거 도로우선 {return_route.get('minutes')}분/"
+                f"{return_route.get('distance_km')}km"
+            )
+        bike_text = (
+            f"자전거 예비 {bicycle.get('minutes')}분/"
+            f"{bicycle.get('distance_km')}km"
+        )
+        if outbound.get("mode") == "public_transit_future_time":
+            outbound_text = (
+                f"출근 Naver 미래시간 {outbound.get('minutes')}분 "
+                f"({short_time(outbound.get('departure_at'))}→"
+                f"{short_time(outbound.get('arrival_at'))}, 실제 근무일 재확인)"
+            )
+        else:
+            outbound_text = (
+                f"출근 대중교통 경로 {outbound.get('minutes')}분"
+                "(당일 운행 확인)"
+            )
+        rendered.append(
+            f"{journey.get('shift')}: {outbound_text} · {return_text} · {bike_text}"
+        )
+    return rendered
 
 
 def write_csv(path: Path, records: list[dict[str, Any]]) -> None:
@@ -1033,7 +1597,22 @@ def write_csv(path: Path, records: list[dict[str, Any]]) -> None:
         "transit_transfers",
         "transit_vehicles",
         "transit_route_url",
+        "transit_route_stale",
         "distance_exclusion_reason",
+        "search_zone",
+        "search_zone_label",
+        "commute_limit_minutes",
+        "commute_extension_minutes",
+        "commute_policy_reason",
+        "commute_policy_eligible",
+        "pay_adjusted_commute",
+        "evening_station_area_status",
+        "evening_station_area_eligible",
+        "evening_station_area_limit_minutes",
+        "evening_nearest_station",
+        "evening_station_distance_km",
+        "evening_station_walk_minutes",
+        "evening_station_area_basis",
         "applied_at",
         "applied_method",
         "application_read_status",
@@ -1055,10 +1634,28 @@ def write_csv(path: Path, records: list[dict[str, Any]]) -> None:
         "work_days",
         "work_time",
         "work_time_option",
+        "weekend_shift_options",
+        "eligibility_lanes",
+        "target_date_options",
+        "target_date_option_evidence",
+        "late_night_shift_options",
+        "late_night_availability",
+        "late_night_route_checked_at",
+        "late_night_route_time_policy",
+        "late_night_shift_journeys",
+        "return_bicycle_minutes",
+        "return_bicycle_distance_km",
         "salary_type",
         "salary",
         "salary_notes",
         "duration_requirement",
+        "work_term_start",
+        "work_term_end",
+        "minimum_commitment_days",
+        "availability_window_start_date",
+        "availability_end_date",
+        "availability_window_days",
+        "availability_compatibility_basis",
         "hard_requirements",
         "certificate_requirements",
         "application_methods",
@@ -1072,7 +1669,9 @@ def write_csv(path: Path, records: list[dict[str, Any]]) -> None:
         "fit_warning",
         "send_readiness",
     ]
-    with path.open("w", newline="", encoding="utf-8-sig") as handle:
+    with atomic_text_writer(
+        path, newline="", encoding="utf-8-sig"
+    ) as handle:
         writer = csv.DictWriter(handle, fieldnames=fields)
         writer.writeheader()
         for record in records:
@@ -1087,6 +1686,7 @@ def write_csv(path: Path, records: list[dict[str, Any]]) -> None:
                 "transit_vehicles",
                 "employer_priorities",
                 "salary_notes",
+                "late_night_shift_journeys",
             ):
                 row[key] = " | ".join(str(value) for value in record[key])
             writer.writerow(row)
@@ -1096,7 +1696,7 @@ def write_markdown(path: Path, records: list[dict[str, Any]]) -> None:
     lines = [
         "# 알바몬 통합 지원 보고서",
         "",
-        "> 환산 시급이 높은 순으로 먼저 정렬하고, 같은 급여에서는 잠실새내역 대중교통 시간이 짧은 순으로 정렬했습니다. `보내기 전 확인`을 확인한 뒤 메시지를 사용하세요.",
+        f"> 환산 시급이 높은 순으로 먼저 정렬하고, 같은 급여에서는 {TRANSIT_ORIGIN['name']} 대중교통 시간이 짧은 순으로 정렬했습니다. 기본 기준은 50분 이하이며 용산·영등포만 확정 급여에 따라 최대 90분까지 연장합니다. `보내기 전 확인`을 확인한 뒤 메시지를 사용하세요.",
         "",
         "## 사용한 지원자 강점",
         "",
@@ -1109,7 +1709,7 @@ def write_markdown(path: Path, records: list[dict[str, Any]]) -> None:
         ("jobs", "apply", "지원 전 — 일반 일자리"),
         ("logistics", "apply", "지원 전 — 물류 일자리"),
         (None, "maybe_later", "부적합·나중에 지원 검토"),
-        (None, "excluded_by_distance", "거리 제외 — 잠실새내역 대중교통 50분 미만 기준"),
+        (None, "excluded_by_distance", "거리 제외 — 적용 통근 기준 초과 또는 경로 미검증"),
         (None, "applied", "이미 지원함 — 재지원하지 말 것"),
     )
     for section, disposition, heading in sections:
@@ -1146,7 +1746,7 @@ def write_markdown(path: Path, records: list[dict[str, Any]]) -> None:
         elif disposition == "excluded_by_distance":
             lines.extend(
                 [
-                    "> 버스·지하철 최단 경로가 50분 미만이 아니거나 실제 근무지까지의 경로를 검증할 수 없는 공고입니다. 지원 대상에서 제외합니다.",
+                    "> 버스·지하철 최단 경로가 해당 공고의 통근 허용 기준을 넘거나 실제 근무지까지의 경로를 검증할 수 없는 공고입니다. 지원 대상에서 제외합니다.",
                     "",
                 ]
             )
@@ -1162,14 +1762,27 @@ def write_markdown(path: Path, records: list[dict[str, Any]]) -> None:
                     "",
                     "**핵심 조건**",
                     "",
+                    f"- 검색 구역: {record['search_zone_label']}",
                     f"- 지역: {record['area']}",
+                    "- 적격 검색 경로: "
+                    + ", ".join(record.get("eligibility_lanes") or ["weekend_short_term"]),
                     f"- 일정: {record['work_days']}; {record['work_time']}",
+                    "- 상세 주말 슬롯: "
+                    + "; ".join(record.get("weekend_shift_options") or ["별도 슬롯 없음"]),
+                    "- 8/15·8/17 1일 선택지: "
+                    + "; ".join(record.get("target_date_options") or ["해당 없음"]),
+                    "- 19:00~02:00 내 야간 슬롯: "
+                    + "; ".join(record.get("late_night_shift_options") or ["해당 없음"]),
                     f"- 급여: {record['salary_type']} {record['salary']}",
+                    "- 급여 주의: "
+                    + "; ".join(record.get("salary_notes") or ["추가 조건 없음"]),
                     f"- 급여 비교 기준: 환산 시급 약 {record['comparable_hourly_pay']:,}원 — {record['pay_comparison_basis']}",
                     f"- 근무기간: {record['duration_requirement'] or '숫자 최소기간 미확인'}",
+                    f"- 근무 가능 종료일: {record.get('availability_end_date') or '미설정'}",
+                    f"- 종료일 적합성: {record.get('availability_compatibility_basis') or '지원 전 확인 필요'}",
                     "- 하드 요건: " + "; ".join(record["hard_requirements"] or ["명시된 요건 없음"]),
                     "- 지원방법: " + ", ".join(record["application_methods"]),
-                    "- 잠실새내역 대중교통: "
+                    f"- {TRANSIT_ORIGIN['name']} 대중교통: "
                     + (
                         f"{record['transit_minutes']}분"
                         if record["transit_minutes"] is not None
@@ -1180,6 +1793,11 @@ def write_markdown(path: Path, records: list[dict[str, Any]]) -> None:
                         if record["transit_vehicles"]
                         else ""
                     ),
+                    f"- 통근 허용 기준: {record['commute_policy_reason']}",
+                    "- 시간대별 야간 통근: "
+                    + "; ".join(
+                        render_late_night_journeys(record) or ["해당 없음"]
+                    ),
                     "",
                 ]
             )
@@ -1187,7 +1805,7 @@ def write_markdown(path: Path, records: list[dict[str, Any]]) -> None:
                 lines.extend(
                     [
                         "**거리 제외 이유**: "
-                        + (record["distance_exclusion_reason"] or "50분 미만 기준 미충족"),
+                        + (record["distance_exclusion_reason"] or "적용 통근 기준 미충족"),
                         "",
                     ]
                 )
@@ -1237,7 +1855,7 @@ def write_markdown(path: Path, records: list[dict[str, Any]]) -> None:
                 )
             if record["fit_warning"]:
                 lines.extend(["**적합성 경고**: " + record["fit_warning"], ""])
-    path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+    atomic_write_text(path, "\n".join(lines).rstrip() + "\n")
 
 
 def parse_args() -> argparse.Namespace:
@@ -1264,7 +1882,12 @@ def main() -> int:
         message_metrics,
     )
     args.output_prefix.parent.mkdir(parents=True, exist_ok=True)
-    write_json(args.output_prefix.with_suffix(".json"), args.input, records)
+    write_json(
+        args.output_prefix.with_suffix(".json"),
+        args.input,
+        records,
+        source_report=report,
+    )
     write_csv(args.output_prefix.with_suffix(".csv"), records)
     write_markdown(args.output_prefix.with_suffix(".md"), records)
     write_message_cache(args.message_cache, records)

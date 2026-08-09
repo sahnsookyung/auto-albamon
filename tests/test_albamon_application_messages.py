@@ -8,11 +8,15 @@ from tools.albamon_application_messages import (
     assess_application_priority,
     bmart_spec,
     build_records,
+    classify_search_zone,
     classify_role,
     comparable_hourly_pay,
+    commute_policy_for_job,
     fallback_regular_spec,
+    load_transit_cache,
     load_message_cache,
     rerank_records,
+    render_late_night_journeys,
     write_markdown,
     write_message_cache,
 )
@@ -21,6 +25,333 @@ from tools.albamon_application_messages import (
 REPORT_PATH = Path(
     "artifacts/albamon/2026-08-01-combined-reranked-no-endtime-preference.json"
 )
+
+
+class TransitCacheOriginTests(unittest.TestCase):
+    def test_future_time_journey_renders_naver_departure_and_arrival(self):
+        [line] = render_late_night_journeys(
+            {
+                "late_night_shift_journeys": [
+                    {
+                        "shift": "20:00~02:00",
+                        "outbound": {
+                            "mode": "public_transit_future_time",
+                            "minutes": 28,
+                            "departure_at": "2026-08-15T19:30:00+09:00",
+                            "arrival_at": "2026-08-15T19:58:00+09:00",
+                        },
+                        "return": {
+                            "mode": "public_transit_future_time",
+                            "minutes": 38,
+                            "departure_at": "2026-08-16T02:00:00+09:00",
+                            "arrival_at": "2026-08-16T02:38:00+09:00",
+                            "vehicles": ["N31"],
+                        },
+                        "bicycle_fallback": {"minutes": 14, "distance_km": 3.1},
+                    }
+                ]
+            }
+        )
+
+        self.assertIn("Naver 미래시간 28분", line)
+        self.assertIn("08-16 02:00→08-16 02:38", line)
+        self.assertIn("자전거 예비 14분", line)
+    def test_application_report_refuses_routes_from_old_origin(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "transit.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "origin": {
+                            "name": "잠실새내역",
+                            "latitude": 37.5115,
+                            "longitude": 127.0867,
+                        },
+                        "jobs": {},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "different origin"):
+                load_transit_cache(path)
+
+
+class CommutePolicyTests(unittest.TestCase):
+    def test_remote_job_has_no_commute_or_station_requirement(self):
+        job = {
+            "remote_job": True,
+            "eligibility_lanes": ["remote_short_term"],
+            "salary_type": "시급",
+            "salary": "12,000원",
+            "duration_review_status": "verified_shorter",
+            "hard_requirements": [],
+            "application_methods": ["online"],
+            "transit_minutes": 0,
+        }
+
+        zone, label = classify_search_zone(job)
+        policy = commute_policy_for_job(
+            job,
+            {"route_status": "not_required", "distance_excluded": False},
+            hourly_pay=12_000,
+        )
+        _, _, reasons, _, metadata = assess_application_priority(job)
+
+        self.assertEqual("remote", zone)
+        self.assertIn("재택", label)
+        self.assertFalse(policy["distance_excluded"])
+        self.assertEqual(0, policy["commute_limit_minutes"])
+        self.assertEqual(20, metadata["commute_priority_score"])
+        self.assertIn("통근 없음", " ".join(reasons))
+
+    def test_bangbae_address_is_classified_as_the_seocho_corridor(self):
+        zone, label = classify_search_zone(
+            {"working_address": "서울 서초구 방배동 123-4"}
+        )
+
+        self.assertEqual("seocho_corridor", zone)
+        self.assertIn("방배", label)
+
+    def test_standard_zones_use_an_inclusive_fifty_minute_limit(self):
+        for minutes, excluded in ((49, False), (50, False), (51, True)):
+            with self.subTest(minutes=minutes):
+                policy = commute_policy_for_job(
+                    {"area": "서울 송파구 잠실동"},
+                    {"route_status": "verified", "transit_minutes": minutes},
+                    hourly_pay=30_000,
+                )
+
+                self.assertEqual(50, policy["commute_limit_minutes"])
+                self.assertEqual(excluded, policy["distance_excluded"])
+                self.assertFalse(policy["pay_adjusted_commute"])
+
+    def test_evening_only_lane_requires_twenty_minute_station_area(self):
+        job = {
+            "area": "서울 강남구 역삼동",
+            "eligibility_lanes": ["songpa_late_night"],
+        }
+        near = commute_policy_for_job(
+            job,
+            {
+                "route_status": "verified",
+                "transit_minutes": 45,
+                "latitude": 37.508844,
+                "longitude": 127.063160,
+            },
+            hourly_pay=30_000,
+        )
+        far = commute_policy_for_job(
+            job,
+            {
+                "route_status": "verified",
+                "transit_minutes": 10,
+                "latitude": 37.485020,
+                "longitude": 126.995010,
+            },
+            hourly_pay=30_000,
+        )
+        unknown = commute_policy_for_job(
+            job,
+            {"route_status": "verified", "transit_minutes": 10},
+            hourly_pay=30_000,
+        )
+
+        self.assertEqual(50, near["commute_limit_minutes"])
+        self.assertEqual("삼성역", near["evening_nearest_station"])
+        self.assertLessEqual(near["evening_station_walk_minutes"], 20)
+        self.assertFalse(near["distance_excluded"])
+        self.assertGreater(far["evening_station_walk_minutes"], 20)
+        self.assertTrue(far["distance_excluded"])
+        self.assertEqual("unverified", unknown["evening_station_area_status"])
+        self.assertTrue(unknown["distance_excluded"])
+
+    def test_weekend_job_keeps_normal_limit_when_it_also_matches_evening_lane(self):
+        policy = commute_policy_for_job(
+            {
+                "area": "서울 송파구 잠실동",
+                "eligibility_lanes": ["weekend_short_term", "songpa_late_night"],
+            },
+            {"route_status": "verified", "transit_minutes": 35},
+            hourly_pay=12_000,
+        )
+
+        self.assertEqual(50, policy["commute_limit_minutes"])
+        self.assertFalse(policy["distance_excluded"])
+
+    def test_premium_zone_interpolates_the_pay_dependent_limit(self):
+        cases = (
+            (11_999, 50),
+            (12_000, 50),
+            (13_000, 60),
+            (14_999, 79),
+            (15_000, 80),
+            (15_300, 81),
+            (17_999, 89),
+            (18_000, 90),
+            (30_000, 90),
+        )
+        for pay, expected_limit in cases:
+            with self.subTest(pay=pay):
+                policy = commute_policy_for_job(
+                    {"area": "서울 용산구 이태원동"},
+                    {"route_status": "verified", "transit_minutes": 50},
+                    hourly_pay=pay,
+                )
+
+                self.assertEqual(expected_limit, policy["commute_limit_minutes"])
+                self.assertEqual(
+                    expected_limit - 50,
+                    policy["commute_extension_minutes"],
+                )
+
+    def test_premium_extension_is_inclusive_and_hard_capped_at_ninety(self):
+        for minutes, excluded in ((89, False), (90, False), (91, True)):
+            with self.subTest(minutes=minutes):
+                policy = commute_policy_for_job(
+                    {"area": "서울 영등포구 여의도동"},
+                    {"route_status": "verified", "transit_minutes": minutes},
+                    hourly_pay=18_000,
+                )
+
+                self.assertEqual(90, policy["commute_limit_minutes"])
+                self.assertEqual(excluded, policy["distance_excluded"])
+
+    def test_fifty_minute_route_is_allowed_by_the_inclusive_cutoff(self):
+        policy = commute_policy_for_job(
+            {"area": "서울 용산구 한남동"},
+            {"route_status": "verified", "transit_minutes": 50},
+            hourly_pay=30_000,
+        )
+
+        self.assertFalse(policy["distance_excluded"])
+        self.assertEqual("", policy["distance_exclusion_reason"])
+
+    def test_unverified_route_keeps_the_existing_distance_decision(self):
+        policy = commute_policy_for_job(
+            {"area": "서울 용산구 한남동"},
+            {"route_status": "unverified", "distance_excluded": True},
+            hourly_pay=15_000,
+        )
+
+        self.assertTrue(policy["distance_excluded"])
+        self.assertFalse(policy["commute_policy_eligible"])
+        self.assertFalse(policy["pay_adjusted_commute"])
+
+    def test_build_records_admits_a_pay_supported_premium_stretch_job(self):
+        job = {
+            "report_section": "jobs",
+            "utility_rank": 1,
+            "utility_tier": "B",
+            "utility_score": 80,
+            "utility_reasons": [],
+            "utility_cautions": [],
+            "recruit_no": 999999980,
+            "company": "프리미엄 행사장",
+            "title": "주말 행사 운영",
+            "url": "https://example.test/premium",
+            "area": "서울 용산구 이태원동",
+            "work_days": "주말(토, 일)",
+            "work_time": "10:00~18:00",
+            "work_time_option": "",
+            "salary_type": "시급",
+            "salary": "13,000원",
+            "duration_requirement": "1주일",
+            "availability_end_date": "2026-09-09",
+            "availability_compatibility_basis": "minimum 7-day commitment fits",
+            "weekend_compatibility_basis": "weekend",
+            "application_methods": ["online"],
+            "hard_requirements": [],
+            "certificate_requirements": [],
+            "parts": ["이벤트·행사스텝"],
+            "skills": ["현장 운영"],
+        }
+        [record] = build_records(
+            {"jobs": [job], "logistics_jobs": []},
+            transit_cache={
+                999999980: {
+                    "distance_excluded": True,
+                    "route_status": "verified",
+                    "transit_minutes": 54,
+                }
+            },
+        )
+
+        self.assertEqual("apply", record["application_disposition"])
+        self.assertEqual("premium_stretch", record["search_zone"])
+        self.assertTrue(record["pay_adjusted_commute"])
+        self.assertEqual(60, record["commute_limit_minutes"])
+        self.assertIn(
+            "2026-09-09",
+            " ".join(record["verify_before_sending"]),
+        )
+
+    def test_songpa_late_night_lane_is_preserved_with_transport_check(self):
+        job = {
+            "report_section": "jobs",
+            "utility_rank": 1,
+            "utility_tier": "B",
+            "utility_score": 80,
+            "utility_reasons": [],
+            "utility_cautions": [],
+            "recruit_no": 999999981,
+            "company": "잠실 야간매장",
+            "title": "마감 스태프",
+            "url": "https://example.test/night",
+            "area": "서울 송파구 잠실동",
+            "work_days": "주5일",
+            "work_time": "20:00~02:00",
+            "work_time_option": "",
+            "eligibility_lanes": ["songpa_late_night"],
+            "late_night_shift_options": ["20:00~02:00 — structured work time"],
+            "late_night_availability": "19:00~02:00",
+            "salary_type": "시급",
+            "salary": "14,000원",
+            "duration_requirement": "3개월 이상",
+            "duration_review_status": "verified_longer",
+            "weekend_compatibility_basis": "different explicit weekdays",
+            "application_methods": ["online"],
+            "hard_requirements": [],
+            "certificate_requirements": [],
+            "parts": ["매장관리"],
+            "skills": [],
+        }
+
+        [record] = build_records(
+            {"jobs": [job], "logistics_jobs": []},
+            transit_cache={
+                999999981: {
+                    "route_status": "verified",
+                    "transit_minutes": 12,
+                    "latitude": 37.5117,
+                    "longitude": 127.0862,
+                    "late_night_route_checked_at": "2026-08-11T22:00:00+09:00",
+                    "late_night_shift_journeys": [
+                        {
+                            "shift": "20:00~02:00",
+                            "outbound": {"minutes": 12},
+                            "return": {
+                                "mode": "night_bus_pattern",
+                                "minutes": 24,
+                                "vehicles": ["N31(심야)"],
+                            },
+                            "bicycle_fallback": {
+                                "minutes": 14,
+                                "distance_km": 3.1,
+                            },
+                        }
+                    ],
+                    "return_bicycle_minutes": 14,
+                    "return_bicycle_distance_km": 3.1,
+                }
+            },
+        )
+
+        self.assertEqual(["songpa_late_night"], record["eligibility_lanes"])
+        self.assertIn("20:00~02:00", record["late_night_shift_options"][0])
+        self.assertIn("귀가 교통수단", " ".join(record["verify_before_sending"]))
+        self.assertEqual("20:00~02:00", record["late_night_shift_journeys"][0]["shift"])
+        self.assertEqual(14, record["return_bicycle_minutes"])
 
 
 @unittest.skipUnless(
@@ -60,6 +391,14 @@ class AlbamonApplicationMessageTests(unittest.TestCase):
         self.assertEqual(
             [record["message"] for record in self.records],
             [record["message"] for record in cached_records],
+        )
+        self.assertEqual(
+            [record["application_disposition"] for record in self.records],
+            [record["application_disposition"] for record in cached_records],
+        )
+        self.assertEqual(
+            [record["send_readiness"] for record in self.records],
+            [record["send_readiness"] for record in cached_records],
         )
 
     def test_already_applied_jobs_are_flagged_for_separate_rendering(self):
@@ -299,6 +638,37 @@ class AlbamonApplicationMessageTests(unittest.TestCase):
             ),
         )
 
+    def test_sales_crew_title_is_classified_as_retail_before_event(self):
+        self.assertEqual(
+            "retail",
+            classify_role(
+                {
+                    "title": "착한구두 성수플래그쉽 행사 판매크루 채용",
+                    "parts": ["이벤트·행사스텝", "매장관리·판매"],
+                }
+            ),
+        )
+
+    def test_motel_counter_message_focuses_on_front_desk_duties(self):
+        item = fallback_regular_spec(
+            {
+                "title": "야간 토요일 일요일 모텔카운터에서 일하실분 구해요",
+                "company": "홀리데이모텔",
+                "parts": ["서비스 기타"],
+                "skills": ["객실 관리", "고객 응대"],
+                "hard_requirements": [],
+                "pre_application_questions": [],
+            }
+        )
+
+        self.assertEqual("front_desk", item["role_family"])
+        self.assertEqual(
+            ["카운터 고객 응대", "입·퇴실 및 예약 확인", "야간 인수인계"],
+            item["employer_priorities"],
+        )
+        self.assertIn("야간 인수인계", item["pitch"])
+        self.assertNotIn("객실 관리", item["pitch"])
+
     def test_wedding_expo_uses_exhibition_priorities(self):
         item = fallback_regular_spec(
             {
@@ -312,6 +682,62 @@ class AlbamonApplicationMessageTests(unittest.TestCase):
 
         self.assertIn("접수·입장 안내", item["employer_priorities"])
         self.assertNotIn("하객 맞이", item["employer_priorities"])
+
+    def test_open_run_message_focuses_on_queue_and_early_arrival_duties(self):
+        item = fallback_regular_spec(
+            {
+                "title": "[단기알바] 백화점 오픈런 스탭 모집",
+                "company": "행사업체",
+                "work_days": "주말(토, 일)",
+                "work_time": "04:30~11:00",
+                "parts": ["서비스 기타"],
+                "skills": [],
+                "hard_requirements": [],
+                "pre_application_questions": [],
+            }
+        )
+
+        self.assertEqual(
+            ["집합시간 준수", "대기 순서·위치 준수", "현장 담당자 지시 이행"],
+            item["employer_priorities"],
+        )
+        self.assertIn("대기 순서·위치 준수", item["pitch"])
+
+    def test_required_suit_question_is_reported_and_keeps_send_conditional(self):
+        job = {
+            "report_section": "jobs",
+            "utility_rank": 1,
+            "utility_tier": "A",
+            "utility_score": 90,
+            "recruit_no": 999999990,
+            "company": "행사업체",
+            "title": "명품매장 입점통제 행사지원 가드",
+            "url": "https://example.test/guard",
+            "area": "서울 영등포구",
+            "work_days": "주말(토, 일)",
+            "work_time": "11:00~20:00",
+            "salary_type": "일급",
+            "salary": "130,000원",
+            "application_methods": ["online"],
+            "hard_requirements": [],
+            "certificate_requirements": [],
+            "parts": ["보안·경비·경호"],
+            "skills": ["입출입 통제"],
+            "pre_application_questions": [
+                {
+                    "title": "검은색 또는 다크네이비 정장 소지하고 계신가요?",
+                    "required": True,
+                }
+            ],
+        }
+
+        [record] = build_records({"jobs": [job], "logistics_jobs": []})
+
+        self.assertTrue(any("정장 소지" in value for value in record["hard_requirements"]))
+        self.assertTrue(any("필수 질문 확인" in value for value in record["verify_before_sending"]))
+        self.assertIn("정장 보유 여부", record["fit_warning"])
+        self.assertEqual("conditional_on_requirement", record["send_readiness"])
+        self.assertIn("정장을 보유", record["optional_sentence_if_true"])
 
     def test_unconfirmed_marine_licence_is_deferred(self):
         job = {
@@ -538,6 +964,20 @@ class AlbamonApplicationMessageTests(unittest.TestCase):
         self.assertIn("주말/", popup["basis"])
         self.assertEqual(10_320, casting["hourly_equivalent"])
         self.assertIn("회비", casting["caution"])
+
+    def test_reviewed_weekend_pay_survives_a_repost_number_change(self):
+        result = comparable_hourly_pay(
+            {
+                "recruit_no": 999999991,
+                "company": "㈜밴스마케팅",
+                "title": "[평일 1.5 / 주말 1.8] 이태원역 인근 물티슈 배포 알바 구인",
+                "salary_type": "시급",
+                "salary": "15,000원",
+            }
+        )
+
+        self.assertEqual(18_000, result["hourly_equivalent"])
+        self.assertIn("주말 시급 18,000원", result["basis"])
 
 
 if __name__ == "__main__":
