@@ -1,24 +1,30 @@
 #!/usr/bin/env python3
-"""Create one deduplicated Albamon report from 맞춤, 여름, and 급구 lists."""
+"""Create one deduplicated Albamon report from saved and supplemental lists."""
 
 from __future__ import annotations
 
 import argparse
 import copy
 import csv
+import hashlib
 import json
+import math
 import re
 import sys
 import time
+import uuid
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 try:
     from tools.albamon_cache import (
+        DEFAULT_APPLIED_REFRESH_HOURS,
+        DEFAULT_CLOSING_REFRESH_HOURS,
         DEFAULT_DETAIL_CACHE_PATH,
+        DEFAULT_ELIGIBLE_REFRESH_HOURS,
         DEFAULT_EXCLUDED_TTL_DAYS,
         DEFAULT_RETENTION_DAYS,
         DetailCache,
@@ -29,6 +35,7 @@ try:
         DEFAULT_SUIT_NO,
         DEFAULT_WORKERS,
         GENERAL_API_URL,
+        LATE_NIGHT_AVAILABILITY,
         GeneralApiClient,
         NEXT_DATA_RE,
         SITE_URL,
@@ -41,10 +48,15 @@ try:
         load_manual_reviews,
         parse_clock_minutes,
         read_url,
+        shift_fits_availability,
     )
+    from tools.albamon_runtime import atomic_text_writer, atomic_write_text
 except ModuleNotFoundError:  # Support direct execution from the repository root.
     from albamon_cache import (
+        DEFAULT_APPLIED_REFRESH_HOURS,
+        DEFAULT_CLOSING_REFRESH_HOURS,
         DEFAULT_DETAIL_CACHE_PATH,
+        DEFAULT_ELIGIBLE_REFRESH_HOURS,
         DEFAULT_EXCLUDED_TTL_DAYS,
         DEFAULT_RETENTION_DAYS,
         DetailCache,
@@ -55,6 +67,7 @@ except ModuleNotFoundError:  # Support direct execution from the repository root
         DEFAULT_SUIT_NO,
         DEFAULT_WORKERS,
         GENERAL_API_URL,
+        LATE_NIGHT_AVAILABILITY,
         GeneralApiClient,
         NEXT_DATA_RE,
         SITE_URL,
@@ -67,7 +80,9 @@ except ModuleNotFoundError:  # Support direct execution from the repository root
         load_manual_reviews,
         parse_clock_minutes,
         read_url,
+        shift_fits_availability,
     )
+    from albamon_runtime import atomic_text_writer, atomic_write_text
 
 
 SUMMER_URL = (
@@ -75,7 +90,22 @@ SUMMER_URL = (
     "?guerrillaBoothNo=35"
 )
 URGENT_URL = "https://www.albamon.com/jobs/urgent"
+REMOTE_URL = "https://www.albamon.com/jobs/telecommuting"
+SUBWAY_URL = "https://www.albamon.com/jobs/subway"
 DEFAULT_APPLIED_HISTORY_PATH = Path("tools/albamon_applied_jobs.json")
+DEFAULT_SPECIAL_SOURCE_CACHE_PATH = Path(
+    "artifacts/albamon/cache/special_sources.json"
+)
+DEFAULT_SPECIAL_SOURCE_CACHE_HOURS = 4
+SPECIAL_SOURCE_CACHE_VERSION = 3
+SPECIAL_SOURCE_NAMES = ("summer", "urgent", "remote", "station_safety")
+DEFAULT_AVAILABILITY_END_DATE = date(2026, 9, 9)
+TITLE_SINGLE_DAY_SIGNAL_RE = re.compile(
+    r"(?:당일\s*(?:알바|근무|업무|스태프|직원|모집)|"
+    r"(?:하루|1\s*일)\s*(?:만|단기|알바|근무|업무|스태프|가능)|"
+    r"단\s*하루|일일\s*(?:알바|근무|스태프))",
+    re.IGNORECASE,
+)
 SEOUL_DISTRICTS = (
     "강남구", "강동구", "강북구", "강서구", "관악구", "광진구", "구로구",
     "금천구", "노원구", "도봉구", "동대문구", "동작구", "마포구", "서대문구",
@@ -86,6 +116,77 @@ TARGET_DISTRICTS = SEOUL_DISTRICTS
 SEOUL_ALL_AREAS = [
     {"si": "I000", "gu": "", "dong": "", "name": "서울 전체"}
 ]
+EVENING_CORRIDOR_AREAS = [
+    {"si": "I000", "gu": "I010", "dong": "", "name": "강남구 전체"},
+    {"si": "I000", "gu": "I150", "dong": "", "name": "서초구 전체"},
+    {"si": "I000", "gu": "I180", "dong": "", "name": "송파구 전체"},
+]
+EVENING_CORRIDOR_DISTRICTS = {"강남구", "서초구", "송파구"}
+EVENING_CORRIDOR_STATIONS = (
+    "역삼역",
+    "강남역",
+    "송파역",
+    "잠실역",
+    "잠실새내역",
+    "삼성역",
+)
+TARGET_SUBWAY_STATIONS = (
+    {
+        "areaCode": "1",
+        "subwayLineCode": "102",
+        "stationCode": "10214",
+        "name": "역삼",
+        "latitude": 37.5007176207,
+        "longitude": 127.0366187692,
+    },
+    {
+        "areaCode": "1",
+        "subwayLineCode": "102",
+        "stationCode": "10215",
+        "name": "강남",
+        "latitude": 37.498164651,
+        "longitude": 127.0283079009,
+    },
+    {
+        "areaCode": "1",
+        "subwayLineCode": "108",
+        "stationCode": "10807",
+        "name": "송파",
+        "latitude": 37.4996861343,
+        "longitude": 127.1121798926,
+    },
+    {
+        "areaCode": "1",
+        "subwayLineCode": "102",
+        "stationCode": "10209",
+        "name": "잠실",
+        "latitude": 37.5133199977,
+        "longitude": 127.100314732,
+    },
+    {
+        "areaCode": "1",
+        "subwayLineCode": "102",
+        "stationCode": "10210",
+        "name": "잠실새내",
+        "latitude": 37.5115686515,
+        "longitude": 127.0863730771,
+    },
+    {
+        "areaCode": "1",
+        "subwayLineCode": "102",
+        "stationCode": "10212",
+        "name": "삼성",
+        "latitude": 37.5088623566,
+        "longitude": 127.0630752722,
+    },
+)
+EVENING_STATION_AREA_LIMIT_MINUTES = 20
+REMOTE_MIN_HOURLY_WON = 10_320
+REMOTE_PRIVACY_OR_SCAM_RE = re.compile(
+    r"방\s*사진|사진\s*제출|영상\s*데이터|행동\s*영상|얼굴\s*(?:촬영|사진)|"
+    r"보험|회원\s*가입|계정\s*(?:생성|대여)|수수료|선입금|홍보\s*(?:요원|알바)|"
+    r"리워드|온라인\s*조사|설문\s*조사"
+)
 REQUESTED_WORK_PERIOD_TYPES = [
     {"key": "ONE_DAY", "value": "5", "description": "하루(1일)"},
     {"key": "LESS_THAN_ONE_WEEK", "value": "10", "description": "1주일이하"},
@@ -94,14 +195,27 @@ REQUESTED_WORK_PERIOD_TYPES = [
         "value": "20",
         "description": "1주일~1개월",
     },
-    {
-        "key": "ONE_MONTH_TO_THREE_MONTH",
-        "value": "30",
-        "description": "1개월~3개월",
-    },
 ]
 REQUESTED_WORK_PERIOD_LABELS = {
     item["description"] for item in REQUESTED_WORK_PERIOD_TYPES
+}
+LATE_NIGHT_WORK_PERIOD_TYPES = copy.deepcopy(REQUESTED_WORK_PERIOD_TYPES)
+LATE_NIGHT_WORK_PERIOD_LABELS = {
+    item["description"] for item in LATE_NIGHT_WORK_PERIOD_TYPES
+}
+TEMPORARY_SINGLE_DAY_ACTIVE_DATES = {
+    date(2026, 8, 13),
+    date(2026, 8, 14),
+}
+TEMPORARY_SINGLE_DAY_TARGET_DATES = {
+    date(2026, 8, 15),
+    date(2026, 8, 17),
+}
+TEMPORARY_SINGLE_DAY_LANE = "aug_15_17_single_day"
+WORK_PERIOD_MINIMUM_DAYS = {
+    "하루(1일)": 1,
+    "1주일이하": 1,
+    "1주일~1개월": 7,
 }
 # Approximate proximity bands, centered on the user's preferred 강남구/송파구
 # area. These are ranking weights, not claims about exact transit time.
@@ -134,9 +248,22 @@ DISTRICT_PROXIMITY_PENALTIES = {
 }
 SOURCE_LABELS = {
     "suit": "맞춤알바",
+    "multi_slot": "1일 선택근무",
+    "late_night": "강남·송파 역세권 저녁",
     "summer": "여름알바",
     "urgent": "급구알바",
+    "remote": "재택알바",
+    "station_safety": "6개 선호역 안전망",
 }
+SOURCE_ORDER = (
+    "suit",
+    "multi_slot",
+    "late_night",
+    "station_safety",
+    "remote",
+    "summer",
+    "urgent",
+)
 ADULT_RESTRICTED_TEXT = "성인인증이 필요한 공고"
 CLOSED_POSTING_ERROR_CODES = {"RCRV005", "RCRV006"}
 CLINICAL_STUDY_REVIEW_REASON = (
@@ -190,8 +317,9 @@ def apply_saved_preferences(
     filtered["condition"] = copy.deepcopy(saved_condition["condition"])
     filtered["condition"]["areas"] = copy.deepcopy(SEOUL_ALL_AREAS)
     # Albamon can mutate a saved condition independently of this workflow. The
-    # user's approved duration buckets are an application rule, so enforce them
-    # here instead of trusting whichever extra buckets the site returns later.
+    # The availability horizon is shorter than a month, so do not spend detail
+    # or route requests on Albamon's one-to-three-month bucket. The remaining
+    # broad buckets are still verified against the posting's actual commitment.
     filtered["condition"]["workPeriodTypes"] = copy.deepcopy(
         REQUESTED_WORK_PERIOD_TYPES
     )
@@ -203,29 +331,215 @@ def apply_saved_preferences(
     return filtered
 
 
+def build_multi_slot_condition(saved_condition: dict[str, Any]) -> dict[str, Any]:
+    """Collect one-day jobs before Albamon's single-day field hides slot pools.
+
+    Employers can publish a one-day posting with one representative weekday in
+    structured metadata while the detailed description offers many selectable
+    dates. The normal saved search applies the weekend field on Albamon's
+    server, so those postings never reach our detail-level schedule verifier.
+    This bounded supplemental query removes only that weekday constraint and
+    limits the result set to one-day work.
+    """
+
+    filtered = apply_saved_preferences(saved_condition, saved_condition)
+    condition = filtered["condition"]
+    condition["workPeriodTypes"] = [copy.deepcopy(REQUESTED_WORK_PERIOD_TYPES[0])]
+    condition["workWeekTypes"] = []
+    condition["workDayTypes"] = []
+    condition["excludeNegoWorkWeek"] = False
+    return filtered
+
+
+def build_late_night_condition(saved_condition: dict[str, Any]) -> dict[str, Any]:
+    """Collect corridor jobs for a separate 19:00-02:00 availability lane.
+
+    Weekday constraints are removed, but the source is limited to Albamon's
+    one-day through one-month buckets. Exact shift containment, the rolling
+    availability deadline, and any contradictory longer commitment are verified
+    from the detail page.
+    """
+
+    filtered = apply_saved_preferences(saved_condition, saved_condition)
+    condition = filtered["condition"]
+    condition["areas"] = copy.deepcopy(EVENING_CORRIDOR_AREAS)
+    condition["workPeriodTypes"] = copy.deepcopy(LATE_NIGHT_WORK_PERIOD_TYPES)
+    condition["workWeekTypes"] = []
+    condition["workDayTypes"] = []
+    condition["excludeNegoWorkWeek"] = False
+    return filtered
+
+
+def build_remote_condition(
+    source_condition: dict[str, Any], saved_condition: dict[str, Any]
+) -> dict[str, Any]:
+    """Collect remote jobs independently of Albamon's Seoul-area metadata."""
+
+    filtered = apply_saved_preferences(source_condition, saved_condition)
+    condition = filtered["condition"]
+    condition["areas"] = []
+    condition["workWeekTypes"] = []
+    condition["workDayTypes"] = []
+    condition["includeHomeWork"] = True
+    condition["excludeNegoWorkWeek"] = False
+    return filtered
+
+
+def build_station_safety_condition(
+    source_condition: dict[str, Any], saved_condition: dict[str, Any]
+) -> dict[str, Any]:
+    """Collect short-term listings tagged to one of the six preferred stations."""
+
+    filtered = apply_saved_preferences(source_condition, saved_condition)
+    condition = filtered["condition"]
+    # AREA_SUBWAY ignores district-style filtering. Explicit station codes keep
+    # this safety net bounded and detail-level checks enforce the real worksite.
+    condition["areas"] = []
+    condition["workWeekTypes"] = []
+    condition["workDayTypes"] = []
+    condition["excludeNegoWorkWeek"] = False
+    extension = filtered.setdefault("extensionCondition", {})
+    extension["subway"] = {
+        "subways": [
+            {
+                key: station[key]
+                for key in ("areaCode", "subwayLineCode", "stationCode", "name")
+            }
+            for station in TARGET_SUBWAY_STATIONS
+        ]
+    }
+    return filtered
+
+
+def _special_source_fingerprint(saved: dict[str, Any]) -> str:
+    serialized = json.dumps(
+        saved.get("condition") or {},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def load_special_source_cache(
+    path: Path | None,
+    saved: dict[str, Any],
+    *,
+    max_age_hours: int,
+    now: datetime | None = None,
+) -> tuple[dict[str, list[dict[str, Any]]], dict[str, int]] | None:
+    if path is None or not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        checked_at = datetime.fromisoformat(str(payload.get("checked_at") or ""))
+    except (OSError, ValueError, json.JSONDecodeError):
+        return None
+    if checked_at.tzinfo is None:
+        checked_at = checked_at.astimezone()
+    observed_at = now or datetime.now().astimezone()
+    if (
+        payload.get("version") != SPECIAL_SOURCE_CACHE_VERSION
+        or payload.get("saved_condition_fingerprint")
+        != _special_source_fingerprint(saved)
+        or observed_at - checked_at > timedelta(hours=max_age_hours)
+    ):
+        return None
+    sources = payload.get("sources")
+    if not isinstance(sources, dict):
+        return None
+    jobs: dict[str, list[dict[str, Any]]] = {}
+    totals: dict[str, int] = {}
+    for source in SPECIAL_SOURCE_NAMES:
+        entry = sources.get(source)
+        if not isinstance(entry, dict) or not isinstance(entry.get("jobs"), list):
+            return None
+        jobs[source] = entry["jobs"]
+        totals[source] = int(entry.get("total") or len(entry["jobs"]))
+    return jobs, totals
+
+
+def write_special_source_cache(
+    path: Path | None,
+    saved: dict[str, Any],
+    source_jobs: dict[str, list[dict[str, Any]]],
+    source_totals: dict[str, int],
+) -> None:
+    if path is None:
+        return
+    payload = {
+        "version": SPECIAL_SOURCE_CACHE_VERSION,
+        "checked_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "saved_condition_fingerprint": _special_source_fingerprint(saved),
+        "sources": {
+            source: {
+                "total": source_totals[source],
+                "jobs": source_jobs[source],
+            }
+            for source in SPECIAL_SOURCE_NAMES
+        },
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_text(
+        path,
+        json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n",
+    )
+
+
 def collect_source_jobs(
     *,
     suit_no: int,
     page_size: int,
     performance_metrics: dict[str, Any] | None = None,
+    special_source_cache: Path | None = DEFAULT_SPECIAL_SOURCE_CACHE_PATH,
+    special_source_cache_hours: int = DEFAULT_SPECIAL_SOURCE_CACHE_HOURS,
+    include_late_night: bool = True,
 ) -> tuple[dict[str, Any], dict[str, list[dict[str, Any]]], dict[str, int]]:
     started = time.perf_counter()
-    with ThreadPoolExecutor(max_workers=3) as executor:
-        saved_future = executor.submit(fetch_saved_condition, suit_no)
-        summer_future = executor.submit(fetch_page_condition, SUMMER_URL)
-        urgent_future = executor.submit(fetch_page_condition, URGENT_URL)
-        saved = saved_future.result()
-        summer_condition = summer_future.result()
-        urgent_condition = urgent_future.result()
+    saved = fetch_saved_condition(suit_no)
+    cached_special = load_special_source_cache(
+        special_source_cache,
+        saved,
+        max_age_hours=special_source_cache_hours,
+    )
     conditions = {
         "suit": apply_saved_preferences(saved, saved),
-        "summer": apply_saved_preferences(summer_condition, saved),
-        "urgent": apply_saved_preferences(urgent_condition, saved),
+        "multi_slot": build_multi_slot_condition(saved),
     }
-    source_jobs: dict[str, list[dict[str, Any]]] = {}
-    source_totals: dict[str, int] = {}
+    if include_late_night:
+        conditions["late_night"] = build_late_night_condition(saved)
+    source_jobs: dict[str, list[dict[str, Any]]] = (
+        dict(cached_special[0]) if cached_special else {}
+    )
+    source_totals: dict[str, int] = (
+        dict(cached_special[1]) if cached_special else {}
+    )
+    if cached_special is None:
+        with ThreadPoolExecutor(max_workers=len(SPECIAL_SOURCE_NAMES)) as executor:
+            condition_futures = {
+                "summer": executor.submit(fetch_page_condition, SUMMER_URL),
+                "urgent": executor.submit(fetch_page_condition, URGENT_URL),
+                "remote": executor.submit(fetch_page_condition, REMOTE_URL),
+                "station_safety": executor.submit(
+                    fetch_page_condition, SUBWAY_URL
+                ),
+            }
+            for source, future in condition_futures.items():
+                source_condition = future.result()
+                if source == "remote":
+                    conditions[source] = build_remote_condition(
+                        source_condition, saved
+                    )
+                elif source == "station_safety":
+                    conditions[source] = build_station_safety_condition(
+                        source_condition, saved
+                    )
+                else:
+                    conditions[source] = apply_saved_preferences(
+                        source_condition, saved
+                    )
     with GeneralApiClient() as api_client:
-        with ThreadPoolExecutor(max_workers=3) as executor:
+        with ThreadPoolExecutor(max_workers=len(conditions)) as executor:
             futures = {
                 executor.submit(
                     fetch_all_search_jobs,
@@ -241,6 +555,17 @@ def collect_source_jobs(
                 jobs, total = future.result()
                 source_jobs[source] = jobs
                 source_totals[source] = total
+        cache_write_errors = 0
+        if cached_special is None:
+            try:
+                write_special_source_cache(
+                    special_source_cache,
+                    saved,
+                    source_jobs,
+                    source_totals,
+                )
+            except OSError:
+                cache_write_errors = 1
         if performance_metrics is not None:
             performance_metrics.update(
                 {
@@ -250,6 +575,13 @@ def collect_source_jobs(
                     "list_collection_seconds": round(
                         time.perf_counter() - started, 3
                     ),
+                    "special_source_cache_hits": (
+                        len(SPECIAL_SOURCE_NAMES) if cached_special else 0
+                    ),
+                    "special_source_network_sources": (
+                        0 if cached_special else len(SPECIAL_SOURCE_NAMES)
+                    ),
+                    "special_source_cache_write_errors": cache_write_errors,
                 }
             )
     return saved, source_jobs, source_totals
@@ -261,7 +593,18 @@ def merge_by_recruit_no(
     jobs_by_id: dict[int, dict[str, Any]] = {}
     sources_by_id: dict[int, set[str]] = defaultdict(set)
     raw_count = 0
-    for source, jobs in source_jobs.items():
+    # Prefer the freshly fetched saved-search row when a cached special-source
+    # row describes the same posting. Special sources still contribute labels.
+    source_order = [
+        source
+        for source in SOURCE_ORDER
+        if source in source_jobs
+    ]
+    source_order.extend(
+        source for source in source_jobs if source not in source_order
+    )
+    for source in source_order:
+        jobs = source_jobs[source]
         raw_count += len(jobs)
         for job in jobs:
             recruit_no = job.get("recruitNo")
@@ -273,6 +616,39 @@ def merge_by_recruit_no(
         recruit_no: sorted(sources) for recruit_no, sources in sources_by_id.items()
     }
     return list(jobs_by_id.values()), source_map, raw_count - len(jobs_by_id)
+
+
+def source_parity_summary(
+    source_map: dict[int, list[str]], *, sample_limit: int = 100
+) -> dict[str, Any]:
+    """Expose exclusive discovery so source regressions stay visible."""
+
+    exclusive: dict[str, list[int]] = {source: [] for source in SOURCE_ORDER}
+    multi_source_count = 0
+    for recruit_no, sources in source_map.items():
+        if len(sources) == 1:
+            exclusive.setdefault(sources[0], []).append(recruit_no)
+        elif len(sources) > 1:
+            multi_source_count += 1
+    return {
+        "multi_source_count": multi_source_count,
+        "exclusive_counts": {
+            source: len(recruit_nos)
+            for source, recruit_nos in exclusive.items()
+            if source in SOURCE_ORDER
+        },
+        "exclusive_recruit_nos": {
+            source: sorted(recruit_nos, reverse=True)[:sample_limit]
+            for source, recruit_nos in exclusive.items()
+            if source in SOURCE_ORDER
+        },
+        "exclusive_sample_limit": sample_limit,
+        "exclusive_samples_truncated": {
+            source: max(0, len(recruit_nos) - sample_limit)
+            for source, recruit_nos in exclusive.items()
+            if source in SOURCE_ORDER
+        },
+    }
 
 
 SEOUL_COORDINATE_BOUNDS = {
@@ -288,16 +664,107 @@ OUTSIDE_SEOUL_ADDRESS_RE = re.compile(
 )
 
 
-def pre_detail_exclusion_reason(job: dict[str, Any]) -> str | None:
+def _list_salary_amount(job: dict[str, Any]) -> int:
+    digits = re.sub(r"\D", "", str(job.get("pay") or ""))
+    return int(digits) if digits else 0
+
+
+def _list_shift_fits_evening(job: dict[str, Any]) -> bool:
+    text = " ".join(
+        str(job.get(field) or "")
+        for field in ("workingTime", "recruitTitle")
+    )
+    for match in re.finditer(
+        r"(?<!\d)([01]?\d|2[0-3]):([0-5]\d)\s*(?:~|～|-)\s*"
+        r"([01]?\d|2[0-3]):([0-5]\d)(?!\d)",
+        text,
+    ):
+        start = f"{int(match.group(1)):02d}:{match.group(2)}"
+        end = f"{int(match.group(3)):02d}:{match.group(4)}"
+        if shift_fits_availability(start, end):
+            return True
+    return False
+
+
+def station_safety_pre_detail_exclusion_reason(
+    job: dict[str, Any],
+) -> str | None:
+    """Keep only list rows likely to fit weekend/evening availability."""
+
+    text = " ".join(
+        str(job.get(field) or "")
+        for field in (
+            "recruitTitle",
+            "workingWeek",
+            "workingDate",
+            "workingPeriod",
+            "workingTime",
+        )
+    )
+    if re.search(
+        r"주말|토요일|일요일|\([토일]\)|"
+        r"(?<![0-9가-힣])(?:토|일)(?![가-힣])",
+        text,
+    ):
+        return None
+    if _list_shift_fits_evening(job):
+        return None
+    selectability_text = " ".join(
+        str(job.get(field) or "")
+        for field in ("recruitTitle", "workingWeek", "workingDate", "workingTime")
+    )
+    if re.search(r"하루|1일", str(job.get("workingPeriod") or "")) and re.search(
+        r"원하는\s*날|(?:날짜|요일|근무일)\s*선택|"
+        r"(?:근무일|요일|시간)\s*협의",
+        selectability_text,
+    ):
+        return None
+    return (
+        "station safety-net listing has no list-level weekend, evening, "
+        "or selectable-day signal"
+    )
+
+
+def remote_pre_detail_exclusion_reason(job: dict[str, Any]) -> str | None:
+    """Bound remote detail reads to transparent hourly, low-risk listings."""
+
+    text = " ".join(
+        (
+            str(job.get("recruitTitle") or ""),
+            " ".join(str(part) for part in job.get("parts") or []),
+        )
+    )
+    if REMOTE_PRIVACY_OR_SCAM_RE.search(text):
+        return "remote listing requests risky data, signup, fees, or promotional work"
+    salary_type = enum_description(job.get("payType"))
+    if salary_type != "시급":
+        return "remote safety lane requires a stated hourly wage"
+    amount = _list_salary_amount(job)
+    if amount < REMOTE_MIN_HOURLY_WON:
+        return (
+            "remote hourly wage is below the configured floor: "
+            f"{amount:,} < {REMOTE_MIN_HOURLY_WON:,} won"
+        )
+    return None
+
+
+def pre_detail_exclusion_reason(
+    job: dict[str, Any], *, allow_outside_seoul: bool = False
+) -> str | None:
     """Apply only exclusions that are conclusive in list-level metadata."""
 
     title = str(job.get("recruitTitle") or "")
     parts = " ".join(str(part) for part in job.get("parts") or [])
-    if re.search(r"생동성|임상\s*시험|건강기능식품\s*시험", f"{title} {parts}"):
+    if re.search(
+        r"생동성|임상\s*시험|건강기능식품(?:\s*(?:시험|테스트))?|"
+        r"의료기기(?:\s*(?:시험|테스트))?|화장품[^\n]{0,20}(?:시험|테스트)|"
+        r"필러|임플란트",
+        f"{title} {parts}",
+    ):
         return "clinical-study recruitment is outside the weekend job workflow"
     if re.search(
         r"운전면허\s*(?:필수|소지)|발렛|탁송|대리운전|"
-        r"(?:배송|운전)\s*(?:기사|사원|직원|알바)",
+        r"라이더|배달\s*대행|(?:배송|운전)\s*(?:기사|사원|직원|알바)",
         title,
     ):
         return "title conclusively identifies a driving/licence role"
@@ -318,6 +785,8 @@ def pre_detail_exclusion_reason(job: dict[str, Any]) -> str | None:
         )
     )
     if (
+        not allow_outside_seoul
+        and
         address
         and "서울" not in address
         and OUTSIDE_SEOUL_ADDRESS_RE.search(address)
@@ -329,15 +798,26 @@ def pre_detail_exclusion_reason(job: dict[str, Any]) -> str | None:
 
 def prefilter_search_jobs(
     jobs: list[dict[str, Any]],
+    source_map: dict[int, list[str]] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     kept: list[dict[str, Any]] = []
     excluded: list[dict[str, Any]] = []
     for job in jobs:
-        reason = pre_detail_exclusion_reason(job)
+        recruit_no = int(job["recruitNo"])
+        sources = set((source_map or {}).get(recruit_no, []))
+        remote_candidate = "remote" in sources
+        remote_only = bool(sources) and sources <= {"remote"}
+        station_only = bool(sources) and sources <= {"station_safety"}
+        reason = pre_detail_exclusion_reason(
+            job, allow_outside_seoul=remote_only
+        )
+        if reason is None and remote_candidate:
+            reason = remote_pre_detail_exclusion_reason(job)
+        if reason is None and station_only:
+            reason = station_safety_pre_detail_exclusion_reason(job)
         if reason is None:
             kept.append(job)
             continue
-        recruit_no = int(job["recruitNo"])
         excluded.append(
             {
                 "recruit_no": recruit_no,
@@ -426,6 +906,29 @@ def target_district(record: dict[str, Any]) -> str | None:
         record["area_screen_note"] = "work location is broader than a verified Seoul district"
         return None
     haystack = f"{record.get('area', '')} {record.get('working_address', '')}"
+    try:
+        latitude = float(record.get("latitude"))
+        longitude = float(record.get("longitude"))
+    except (TypeError, ValueError):
+        coordinates_outside_seoul = False
+    else:
+        coordinates_outside_seoul = not (
+            SEOUL_COORDINATE_BOUNDS["min_latitude"]
+            <= latitude
+            <= SEOUL_COORDINATE_BOUNDS["max_latitude"]
+            and SEOUL_COORDINATE_BOUNDS["min_longitude"]
+            <= longitude
+            <= SEOUL_COORDINATE_BOUNDS["max_longitude"]
+        )
+    if (
+        coordinates_outside_seoul
+        and not re.search(r"서울(?:특별시)?", haystack)
+        and not explicit_title_districts
+    ):
+        record["area_screen_note"] = (
+            "coordinates are outside Seoul and the address has no explicit Seoul city"
+        )
+        return None
     explicitly_outside_seoul = bool(
         re.search(
             r"(?:인천|부산|대구|광주|대전|울산|세종)(?:광역시)?|"
@@ -488,14 +991,148 @@ def target_district(record: dict[str, Any]) -> str | None:
     return district
 
 
+def station_safety_proximity(record: dict[str, Any]) -> dict[str, Any]:
+    """Return the conservative walking estimate to the closest target station."""
+
+    try:
+        latitude = float(record.get("latitude"))
+        longitude = float(record.get("longitude"))
+    except (TypeError, ValueError):
+        return {
+            "eligible": False,
+            "nearest_station": "",
+            "straight_line_km": None,
+            "walk_minutes": None,
+            "basis": "worksite coordinates unavailable",
+        }
+
+    def distance_km(station: dict[str, Any]) -> float:
+        earth_radius_km = 6371.0088
+        lat1 = math.radians(latitude)
+        lat2 = math.radians(float(station["latitude"]))
+        delta_lat = lat2 - lat1
+        delta_lon = math.radians(float(station["longitude"]) - longitude)
+        value = (
+            math.sin(delta_lat / 2) ** 2
+            + math.cos(lat1) * math.cos(lat2) * math.sin(delta_lon / 2) ** 2
+        )
+        return earth_radius_km * 2 * math.atan2(math.sqrt(value), math.sqrt(1 - value))
+
+    station, straight_line_km = min(
+        ((station, distance_km(station)) for station in TARGET_SUBWAY_STATIONS),
+        key=lambda item: item[1],
+    )
+    walk_minutes = straight_line_km * 1.2 / 4.8 * 60
+    eligible = walk_minutes <= EVENING_STATION_AREA_LIMIT_MINUTES
+    return {
+        "eligible": eligible,
+        "nearest_station": f"{station['name']}역",
+        "straight_line_km": round(straight_line_km, 3),
+        "walk_minutes": round(walk_minutes, 1),
+        "basis": (
+            f"{station['name']}역 conservative walk estimate {walk_minutes:.1f} min "
+            "(straight line × 1.2 at 4.8 km/h)"
+        ),
+    }
+
+
 def work_period_is_requested(record: dict[str, Any]) -> bool:
-    """Reject only an explicit structured period outside the four user buckets."""
+    """Reject only an explicit period outside the remaining short-term buckets."""
 
     work_period = str(record.get("work_period") or "").strip()
     return not work_period or work_period in REQUESTED_WORK_PERIOD_LABELS
 
 
-def combined_exclusion_reasons(record: dict[str, Any]) -> list[str]:
+def _iso_date(value: Any) -> date | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return date.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def minimum_commitment_days(record: dict[str, Any]) -> int:
+    """Return the safest verified/bucket lower bound for the commitment."""
+
+    candidates = [
+        WORK_PERIOD_MINIMUM_DAYS.get(str(record.get("work_period") or ""), 0)
+    ]
+    explicit_days = record.get("minimum_commitment_days")
+    if isinstance(explicit_days, (int, float)) and explicit_days > 0:
+        candidates.append(math.ceil(float(explicit_days)))
+    minimum_months = record.get("minimum_commitment_months")
+    if isinstance(minimum_months, (int, float)) and minimum_months > 0:
+        candidates.append(math.ceil(float(minimum_months) * 30))
+    return max(candidates)
+
+
+def availability_window_exclusion_reasons(
+    record: dict[str, Any],
+    *,
+    as_of: date,
+    availability_end: date,
+) -> list[str]:
+    """Reject work that cannot finish inside today's Sep 9 availability window."""
+
+    if as_of > availability_end:
+        return [f"availability window ended on {availability_end.isoformat()}"]
+
+    reasons: list[str] = []
+    work_start = _iso_date(record.get("work_term_start"))
+    if work_start and work_start > availability_end:
+        reasons.append(
+            f"work term starts after availability ends: {work_start.isoformat()}"
+        )
+
+    effective_end = effective_work_term_end(record, as_of=as_of)
+    work_end = _iso_date(effective_end)
+    if work_end and work_end > availability_end:
+        reasons.append(
+            f"work term extends beyond {availability_end.isoformat()}: "
+            f"{work_end.isoformat()}"
+        )
+
+    minimum_days = minimum_commitment_days(record)
+    earliest_start = max(as_of, work_start) if work_start else as_of
+    if (
+        minimum_days
+        and earliest_start + timedelta(days=minimum_days - 1) > availability_end
+    ):
+        reasons.append(
+            f"minimum {minimum_days}-day commitment cannot finish by "
+            f"{availability_end.isoformat()}"
+        )
+    return reasons
+
+
+def availability_window_basis(
+    record: dict[str, Any],
+    *,
+    as_of: date,
+    availability_end: date,
+) -> str:
+    effective_end = _iso_date(effective_work_term_end(record, as_of=as_of))
+    if effective_end:
+        return (
+            f"verified work term ends {effective_end.isoformat()}, no later than "
+            f"{availability_end.isoformat()}"
+        )
+    minimum_days = minimum_commitment_days(record)
+    if minimum_days:
+        return (
+            f"minimum {minimum_days}-day commitment fits by "
+            f"{availability_end.isoformat()}"
+        )
+    return (
+        f"no required work beyond {availability_end.isoformat()} found; "
+        "confirm the final work date before applying"
+    )
+
+
+def combined_exclusion_reasons(
+    record: dict[str, Any], *, as_of: date, availability_end: date
+) -> list[str]:
     reasons: list[str] = []
     if not record["target_district"]:
         reasons.append(record.get("area_screen_note") or "outside Seoul")
@@ -506,7 +1143,15 @@ def combined_exclusion_reasons(record: dict[str, Any]) -> list[str]:
     if not record.get("education_compatible", True):
         reasons.append(record["education_compatibility_basis"])
     if record["work_term_ended"]:
-        reasons.append(f"work term ends by {record['work_term_end']}")
+        reasons.append(
+            record.get("work_term_expiry_basis")
+            or f"work term ends by {record['work_term_end']}"
+        )
+    reasons.extend(
+        availability_window_exclusion_reasons(
+            record, as_of=as_of, availability_end=availability_end
+        )
+    )
     if record["driving_license_required"]:
         reasons.append(record["driving_license_basis"])
     work_period = str(record.get("work_period") or "").strip()
@@ -516,6 +1161,178 @@ def combined_exclusion_reasons(record: dict[str, Any]) -> list[str]:
         reasons.append(record["duration_requirement"])
     elif record.get("duration_review_status") == "non_numeric_requirement":
         reasons.append(record["duration_requirement"])
+    if record.get("clinical_study"):
+        reasons.append(CLINICAL_STUDY_REVIEW_REASON)
+    return reasons
+
+
+def late_night_exclusion_reasons(
+    record: dict[str, Any],
+    *,
+    as_of: date | None = None,
+    availability_end: date = DEFAULT_AVAILABILITY_END_DATE,
+) -> list[str]:
+    """Apply hard constraints for the short-term station-corridor evening lane."""
+
+    reasons: list[str] = []
+    if record.get("target_district") not in EVENING_CORRIDOR_DISTRICTS:
+        reasons.append(
+            "verified worksite is outside the Gangnam-Seocho-Songpa corridor"
+        )
+    if not record.get("late_night_compatible"):
+        reasons.append("no advertised shift fits fully within 19:00-02:00")
+    work_period = str(record.get("work_period") or "").strip()
+    if work_period not in LATE_NIGHT_WORK_PERIOD_LABELS:
+        reasons.append(
+            "work period is not verified in Albamon's one-day through "
+            f"one-month buckets: {work_period or 'unknown'}"
+        )
+    if record.get("requires_month_or_longer"):
+        reasons.append(record["duration_requirement"])
+    elif record.get("duration_review_status") in {
+        "non_numeric_requirement",
+        "unverified",
+    }:
+        reasons.append(record["duration_requirement"])
+    if not record["demographic_compatible"]:
+        reasons.append(record["demographic_compatibility_basis"])
+    if not record.get("education_compatible", True):
+        reasons.append(record["education_compatibility_basis"])
+    if record["work_term_ended"]:
+        reasons.append(
+            record.get("work_term_expiry_basis")
+            or f"work term ends by {record['work_term_end']}"
+        )
+    reasons.extend(
+        availability_window_exclusion_reasons(
+            record,
+            as_of=as_of or datetime.now().astimezone().date(),
+            availability_end=availability_end,
+        )
+    )
+    if record["driving_license_required"]:
+        reasons.append(record["driving_license_basis"])
+    if record.get("clinical_study"):
+        reasons.append(CLINICAL_STUDY_REVIEW_REASON)
+    return reasons
+
+
+def remote_exclusion_reasons(
+    record: dict[str, Any], *, as_of: date, availability_end: date
+) -> list[str]:
+    """Fail closed for short-term remote work with comparable hourly pay."""
+
+    reasons: list[str] = []
+    text = " ".join(
+        (
+            str(record.get("title") or ""),
+            str(record.get("company") or ""),
+            " ".join(str(item) for item in record.get("hard_requirements") or []),
+        )
+    )
+    if REMOTE_PRIVACY_OR_SCAM_RE.search(text):
+        reasons.append(
+            "remote listing requests risky data, signup, fees, or promotional work"
+        )
+    if record.get("application_risk_signals"):
+        reasons.append(
+            "remote detail contains an unsafe application signal: "
+            + ", ".join(str(item) for item in record["application_risk_signals"])
+        )
+    if record.get("salary_type") != "시급":
+        reasons.append("remote safety lane requires a stated hourly wage")
+    elif numeric_pay(record) < REMOTE_MIN_HOURLY_WON:
+        reasons.append(
+            "remote hourly wage is below the configured floor: "
+            f"{numeric_pay(record):,} < {REMOTE_MIN_HOURLY_WON:,} won"
+        )
+    if not record.get("demographic_compatible"):
+        reasons.append(record.get("demographic_compatibility_basis") or "demographic mismatch")
+    if not record.get("education_compatible", True):
+        reasons.append(record.get("education_compatibility_basis") or "education mismatch")
+    if record.get("application_possible") is False:
+        reasons.append("Albamon currently marks the posting as not applicable")
+    if record.get("work_term_ended"):
+        reasons.append(
+            record.get("work_term_expiry_basis")
+            or f"work term ends by {record.get('work_term_end')}"
+        )
+    reasons.extend(
+        availability_window_exclusion_reasons(
+            record, as_of=as_of, availability_end=availability_end
+        )
+    )
+    if record.get("driving_license_required"):
+        reasons.append(record.get("driving_license_basis") or "driving licence required")
+    if not work_period_is_requested(record):
+        reasons.append(
+            "work period is outside requested buckets: "
+            f"{record.get('work_period') or 'unknown'}"
+        )
+    if record.get("requires_month_or_longer"):
+        reasons.append(record.get("duration_requirement") or "one-month minimum")
+    elif record.get("duration_review_status") in {
+        "non_numeric_requirement",
+        "unverified",
+    }:
+        reasons.append(record.get("duration_requirement") or "duration unverified")
+    if record.get("clinical_study"):
+        reasons.append(CLINICAL_STUDY_REVIEW_REASON)
+    if record.get("hard_requirement_review_status") == (
+        "unverified: no readable description text"
+    ):
+        reasons.append("remote job description could not be verified")
+    schedule_is_flexible = bool(
+        re.search(r"협의|자율|원하는\s*(?:날|시간)", str(record.get("work_days") or ""))
+        and re.search(r"협의|자율|원하는\s*시간", str(record.get("work_time") or ""))
+    )
+    if not (
+        record.get("weekend_compatible")
+        or record.get("late_night_compatible")
+        or schedule_is_flexible
+    ):
+        reasons.append(
+            "remote schedule is not verified as weekend, 19:00-02:00, or fully flexible"
+        )
+    return reasons
+
+
+def temporary_single_day_exclusion_reasons(
+    record: dict[str, Any], *, as_of: date
+) -> list[str]:
+    """Apply hard filters to the self-expiring Aug 15/17 one-day lane."""
+
+    if as_of not in TEMPORARY_SINGLE_DAY_ACTIVE_DATES:
+        return ["temporary Aug 15/17 search is active only on Aug 13-14, 2026"]
+    target_values = {
+        target.isoformat() for target in TEMPORARY_SINGLE_DAY_TARGET_DATES
+    }
+    options = set(record.get("target_date_options") or []) & target_values
+    if not options:
+        return ["no independently selectable Aug 15 or Aug 17 work date verified"]
+
+    reasons: list[str] = []
+    if not record.get("target_district"):
+        reasons.append(record.get("area_screen_note") or "outside Seoul")
+    work_period = str(record.get("work_period") or "").strip()
+    work_period_value = str(record.get("work_period_value") or "").strip()
+    if work_period != "하루(1일)" and work_period_value != "5":
+        reasons.append(f"work period is not verified as one day: {work_period or 'unknown'}")
+    if not record.get("demographic_compatible"):
+        reasons.append(record.get("demographic_compatibility_basis") or "demographic mismatch")
+    if not record.get("education_compatible", True):
+        reasons.append(record.get("education_compatibility_basis") or "education mismatch")
+    if record.get("work_term_ended"):
+        reasons.append(
+            record.get("work_term_expiry_basis")
+            or f"work term ends by {record.get('work_term_end')}"
+        )
+    if record.get("driving_license_required"):
+        reasons.append(record.get("driving_license_basis") or "driving licence required")
+    if record.get("requires_month_or_longer"):
+        reasons.append(record.get("duration_requirement") or "one-month minimum")
+    elif record.get("duration_review_status") == "non_numeric_requirement":
+        reasons.append(record.get("duration_requirement") or "long-term requirement")
     if record.get("clinical_study"):
         reasons.append(CLINICAL_STUDY_REVIEW_REASON)
     return reasons
@@ -563,9 +1380,27 @@ def enrich_special_requirements(record: dict[str, Any]) -> None:
         )
 
 
-def semantic_duplicate_key(record: dict[str, Any]) -> str:
+def semantic_duplicate_key(
+    record: dict[str, Any], *, include_material_terms: bool = True
+) -> str:
     if record.get("is_coupang") and re.search(r"소분|분류", record.get("title", "")):
-        return "coupang-cls-daily-sorting"
+        fields: list[Any] = [
+            "coupang-cls-daily-sorting",
+            record.get("logistics_category"),
+            record.get("work_period"),
+        ]
+        if include_material_terms:
+            fields.extend(
+                (
+                    record.get("work_days"),
+                    record.get("work_time"),
+                    record.get("salary_type"),
+                    record.get("salary"),
+                    record.get("weekend_shift_options"),
+                    record.get("late_night_shift_options"),
+                )
+            )
+        return "|".join(normalized_text(value) for value in fields)
     if (
         "왓어브레드" in str(record.get("title") or "")
         and "잠실롯데월드몰" in str(record.get("title") or "")
@@ -588,14 +1423,15 @@ def semantic_duplicate_key(record: dict[str, Any]) -> str:
                 normalized_text(record.get("company")),
             )
         )
-    return "|".join(
-        (
-            normalized_text(record.get("title")),
-            normalized_text(record.get("company")),
-            normalized_text(record.get("working_address")),
-            normalized_text(record.get("work_time")),
-        )
-    )
+    fields = [
+        "title",
+        "company",
+        "working_address",
+        "work_time",
+    ]
+    if include_material_terms:
+        fields.extend(("work_days", "salary_type", "salary"))
+    return "|".join(normalized_text(record.get(field)) for field in fields)
 
 
 def deduplicate_semantic(records: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], int]:
@@ -697,17 +1533,28 @@ def assess_utility(record: dict[str, Any]) -> tuple[int, str, list[str], list[st
         else:
             adjust(0, f"{district} is a core preferred district")
 
+    eligibility_lanes = set(record.get("eligibility_lanes") or [])
     weekend_basis = str(record.get("weekend_compatibility_basis") or "")
-    if weekend_basis.startswith("weekend") or weekend_basis == "explicit weekdays":
+    if (
+        "songpa_late_night" in eligibility_lanes
+        and "weekend_short_term" not in eligibility_lanes
+    ):
+        adjust(10, "advertised shift fits the station-corridor 19:00-02:00 availability")
+    elif (
+        TEMPORARY_SINGLE_DAY_LANE in eligibility_lanes
+        and "weekend_short_term" not in eligibility_lanes
+    ):
+        adjust(10, "exact Aug 15/17 one-day option is detail-verified")
+    elif weekend_basis.startswith("weekend") or weekend_basis == "explicit weekdays":
         adjust(10, "weekend schedule is explicit")
     else:
         adjust(3, "posting explicitly offers a negotiable weekend option")
 
     duration_status = record.get("duration_review_status")
     if duration_status == "verified_shorter":
-        adjust(14, "commitment is verified shorter than one month")
+        adjust(14, "short commitment fits the current availability window")
     elif duration_status == "not_found":
-        adjust(6, "no one-month minimum found")
+        adjust(6, "no conflicting minimum commitment found")
     elif duration_status == "not_stated":
         adjust(-6, "numeric commitment is not stated", caution=True)
     elif duration_status == "negotiable":
@@ -818,9 +1665,66 @@ def work_term_ends_on_or_before(work_term_end: Any, *, as_of: date) -> bool:
         return False
 
 
-def effective_work_term_end(record: dict[str, Any], *, as_of: date) -> str | None:
-    """Return the structured end date or infer an explicit work date from the title."""
+def exact_shift_start_minutes(record: dict[str, Any]) -> list[int]:
+    """Return advertised shift starts without treating unrelated times as shifts."""
 
+    values: list[Any] = [
+        record.get("work_time"),
+        record.get("start_time"),
+        *(record.get("weekend_shift_options") or []),
+        *(record.get("late_night_shift_options") or []),
+        *(record.get("target_date_option_evidence") or []),
+    ]
+    starts: set[int] = set()
+    for value in values:
+        text = str(value or "")
+        direct = parse_clock_minutes(text)
+        if direct is not None:
+            starts.add(direct)
+        for match in re.finditer(
+            r"(?<!\d)([01]?\d|2[0-3]):([0-5]\d)\s*(?:~|～|-)", text
+        ):
+            starts.add(int(match.group(1)) * 60 + int(match.group(2)))
+    return sorted(starts)
+
+
+def record_work_term_has_expired(
+    record: dict[str, Any], *, observed_at: date | datetime
+) -> tuple[bool, str]:
+    """Expire past dates, or today's posting only after its last exact shift starts."""
+
+    observed_date = observed_at.date() if isinstance(observed_at, datetime) else observed_at
+    effective_end = _iso_date(effective_work_term_end(record, as_of=observed_date))
+    if effective_end is None:
+        return False, "no exact final work date"
+    if effective_end < observed_date:
+        return True, f"final work date {effective_end.isoformat()} is in the past"
+    if effective_end > observed_date:
+        return False, f"final work date is {effective_end.isoformat()}"
+    if not isinstance(observed_at, datetime):
+        return False, "final work date is today; current time was not supplied"
+    shift_starts = exact_shift_start_minutes(record)
+    if not shift_starts:
+        return False, "final work date is today; exact shift start is unavailable"
+    current_minutes = observed_at.hour * 60 + observed_at.minute
+    last_start = max(shift_starts)
+    expired = current_minutes >= last_start
+    return (
+        expired,
+        "final work date is today; last advertised shift starts at "
+        f"{last_start // 60:02d}:{last_start % 60:02d}",
+    )
+
+
+def effective_work_term_end(record: dict[str, Any], *, as_of: date) -> str | None:
+    """Return the safest final date from structured fields and explicit title dates.
+
+    A materially older title range is not rescued by a contradictory future
+    structured date. Those mixed postings are unsafe to surface because the
+    applicant-facing title can describe a schedule that has already ended.
+    """
+
+    structured_end: str | None = None
     structured = record.get("work_term_end")
     if isinstance(structured, str) and structured:
         try:
@@ -828,7 +1732,7 @@ def effective_work_term_end(record: dict[str, Any], *, as_of: date) -> str | Non
         except ValueError:
             pass
         else:
-            return structured
+            structured_end = structured
 
     title = str(record.get("title") or "")
     title_match = re.search(
@@ -860,7 +1764,10 @@ def effective_work_term_end(record: dict[str, Any], *, as_of: date) -> str | Non
                 start_month = int(korean_date_list.group(1))
                 end_month = start_month
                 end_day = int(korean_date_list.group(3))
-            elif str(record.get("work_period") or "") == "하루(1일)":
+            elif (
+                str(record.get("work_period") or "") == "하루(1일)"
+                or TITLE_SINGLE_DAY_SIGNAL_RE.search(title)
+            ):
                 korean_single = re.search(
                     r"(?<!\d)(\d{1,2})\s*월\s*(\d{1,2})\s*일",
                     title,
@@ -871,50 +1778,127 @@ def effective_work_term_end(record: dict[str, Any], *, as_of: date) -> str | Non
                 )
                 single = korean_single or slash_single
                 if not single:
-                    return None
+                    return structured_end
                 start_month = int(single.group(1))
                 end_month = start_month
                 end_day = int(single.group(2))
             else:
-                return None
+                return structured_end
     end_year = as_of.year + (1 if end_month < start_month else 0)
     try:
-        return date(end_year, end_month, end_day).isoformat()
+        title_end = date(end_year, end_month, end_day).isoformat()
     except ValueError:
-        return None
+        return structured_end
+    if structured_end is None:
+        return title_end
+    return min(structured_end, title_end)
+
+
+def prune_expired_audit_records(
+    records: list[dict[str, Any]], *, observed_at: date | datetime
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Remove conclusively expired jobs from a latest-report audit section."""
+
+    kept: list[dict[str, Any]] = []
+    expired_records: list[dict[str, Any]] = []
+    for record in records:
+        expired, expiry_basis = record_work_term_has_expired(
+            record, observed_at=observed_at
+        )
+        if not expired:
+            kept.append(record)
+            continue
+        record["work_term_ended"] = True
+        record["work_term_expiry_basis"] = expiry_basis
+        expired_records.append(record)
+    return kept, expired_records
 
 
 def exclude_report_jobs_ending_on_or_before(
-    report: dict[str, Any], *, as_of: date
+    report: dict[str, Any],
+    *,
+    as_of: date | datetime,
+    availability_end: date | None = None,
 ) -> dict[str, Any]:
-    """Apply the inclusive work-term cutoff to an already-generated report."""
+    """Apply stale-date and optional availability cutoffs to an existing report."""
 
+    as_of_date = as_of.date() if isinstance(as_of, datetime) else as_of
     removed: list[dict[str, Any]] = []
     for section in ("jobs", "logistics_jobs"):
         kept: list[dict[str, Any]] = []
         for record in report.get(section) or []:
-            effective_end = effective_work_term_end(record, as_of=as_of)
-            if not work_term_ends_on_or_before(effective_end, as_of=as_of):
+            effective_end = effective_work_term_end(record, as_of=as_of_date)
+            removal_reasons: list[str] = []
+            expired, expiry_basis = record_work_term_has_expired(
+                record, observed_at=as_of
+            )
+            record["work_term_expiry_basis"] = expiry_basis
+            if expired:
+                if not record.get("work_term_end"):
+                    record["work_term_end"] = effective_end
+                    record["work_term_end_source"] = "posting title date range"
+                record["work_term_ended"] = True
+                removal_reasons.append(expiry_basis)
+            if availability_end is not None:
+                availability_reasons = availability_window_exclusion_reasons(
+                    record, as_of=as_of_date, availability_end=availability_end
+                )
+                removal_reasons.extend(availability_reasons)
+                record["availability_window_start_date"] = as_of_date.isoformat()
+                record["availability_end_date"] = availability_end.isoformat()
+                record["availability_window_days"] = max(
+                    0, (availability_end - as_of_date).days + 1
+                )
+                record["availability_compatible"] = not availability_reasons
+                record["availability_compatibility_basis"] = (
+                    availability_reasons[0]
+                    if availability_reasons
+                    else availability_window_basis(
+                        record, as_of=as_of_date, availability_end=availability_end
+                    )
+                )
+                if not work_period_is_requested(record):
+                    removal_reasons.append(
+                        "work period is outside requested buckets: "
+                        f"{record.get('work_period') or 'unknown'}"
+                    )
+            if not removal_reasons:
                 kept.append(record)
                 continue
-            if not record.get("work_term_end"):
-                record["work_term_end"] = effective_end
-                record["work_term_end_source"] = "posting title date range"
-            record["work_term_ended"] = True
-            reason = f"work term ends by {record['work_term_end']}"
             reasons = record.setdefault("exclusion_reasons", [])
-            if reason not in reasons:
-                reasons.append(reason)
+            for reason in removal_reasons:
+                if reason not in reasons:
+                    reasons.append(reason)
             removed.append(record)
         report[section] = kept
         prioritize_records(kept)
 
-    excluded_jobs = report.setdefault("excluded_jobs", [])
+    excluded_jobs, previously_expired = prune_expired_audit_records(
+        list(report.get("excluded_jobs") or []), observed_at=as_of
+    )
+    pre_detail_jobs, expired_pre_detail = prune_expired_audit_records(
+        list(report.get("pre_detail_excluded_jobs") or []), observed_at=as_of
+    )
+    report["excluded_jobs"] = excluded_jobs
+    report["pre_detail_excluded_jobs"] = pre_detail_jobs
     excluded_ids = {int(record["recruit_no"]) for record in excluded_jobs}
     excluded_jobs.extend(
-        record for record in removed if int(record["recruit_no"]) not in excluded_ids
+        record
+        for record in removed
+        if not record.get("work_term_ended")
+        and int(record["recruit_no"]) not in excluded_ids
     )
-    report["work_term_cutoff_date"] = as_of.isoformat()
+    newly_expired = [record for record in removed if record.get("work_term_ended")]
+    report["expired_jobs_flushed_count"] = int(
+        report.get("expired_jobs_flushed_count") or 0
+    ) + len(previously_expired) + len(expired_pre_detail) + len(newly_expired)
+    report["work_term_cutoff_date"] = as_of_date.isoformat()
+    if availability_end is not None:
+        report["availability_window_start_date"] = as_of_date.isoformat()
+        report["availability_end_date"] = availability_end.isoformat()
+        report["availability_window_days"] = max(
+            0, (availability_end - as_of_date).days + 1
+        )
     report["eligible_non_logistics_count"] = len(report.get("jobs") or [])
     report["eligible_logistics_group_count"] = len(
         report.get("logistics_jobs") or []
@@ -923,7 +1907,21 @@ def exclude_report_jobs_ending_on_or_before(
         report["eligible_non_logistics_count"]
         + report["eligible_logistics_group_count"]
     )
-    report["excluded_count"] = len(excluded_jobs)
+    report["eligible_late_night_count"] = sum(
+        "songpa_late_night" in (record.get("eligibility_lanes") or [])
+        for record in [
+            *(report.get("jobs") or []),
+            *(report.get("logistics_jobs") or []),
+        ]
+    )
+    report["eligible_remote_count"] = sum(
+        "remote_short_term" in (record.get("eligibility_lanes") or [])
+        for record in [
+            *(report.get("jobs") or []),
+            *(report.get("logistics_jobs") or []),
+        ]
+    )
+    report["excluded_count"] = len(excluded_jobs) + len(pre_detail_jobs)
     report["exclusion_reason_counts"] = dict(
         Counter(
             reason
@@ -1162,6 +2160,21 @@ def write_combined_markdown(path: Path, report: dict[str, Any]) -> None:
         if item.get("already_applied")
     ]
     actionable_jobs = actionable_normal_jobs + actionable_logistics_jobs
+    late_night_jobs = [
+        item
+        for item in actionable_jobs
+        if "songpa_late_night" in (item.get("eligibility_lanes") or [])
+    ]
+    temporary_single_day_jobs = [
+        item
+        for item in actionable_jobs
+        if TEMPORARY_SINGLE_DAY_LANE in (item.get("eligibility_lanes") or [])
+    ]
+    remote_jobs = [
+        item
+        for item in actionable_jobs
+        if "remote_short_term" in (item.get("eligibility_lanes") or [])
+    ]
     early_daytime = [
         item
         for item in actionable_jobs
@@ -1173,18 +2186,29 @@ def write_combined_markdown(path: Path, report: dict[str, Any]) -> None:
         if item["ends_before_threshold"] is True and item.get("overnight")
     ]
     lines = [
-        "# Albamon combined 맞춤 · 여름 · 급구 report",
+        "# Albamon combined 맞춤 · 역세권 · 재택 · 여름 · 급구 report",
         "",
         f"Generated: {report['generated_at']}",
         "Target area: all 25 Seoul districts",
         "Weekend rule: weekend-only (Saturday and/or Sunday), including negotiable schedules only when the posting verifies a weekend option.",
-        "Duration rule: Albamon buckets up to 1–3 months are collected, then postings with a verified hard minimum of one month or longer are excluded.",
-        f"Work-term cutoff: jobs ending on or before {report.get('work_term_cutoff_date') or report['generated_at'][:10]} are excluded.",
+        (
+            "Availability rule: work must fit from "
+            f"{report.get('availability_window_start_date')} through "
+            f"{report.get('availability_end_date')} inclusive. Fixed work terms "
+            "ending later and minimum commitments that cannot fit are excluded."
+        ),
+        "Duration collection: one day, under one week, and one week to one month; Albamon's one-to-three-month bucket is no longer collected.",
+        "Station-corridor evening lane: weekday is unrestricted, the same availability deadline applies, and a detail-verified shift must fit fully within 19:00–02:00. Final eligibility requires the worksite to fall within the conservative 20-minute walking-radius estimate of a preferred station; the home commute is checked separately.",
+        "Temporary Aug 15/17 lane: active only on Aug 13–14, 2026; requires a verified one-day posting where Aug 15 or Aug 17 can be selected independently.",
+        f"Work-term cutoff: jobs ending before {report.get('work_term_cutoff_date') or report['generated_at'][:10]} are excluded; same-day jobs remain until their last exact advertised shift starts.",
         "Demographics: male age 26, including unrestricted listings; education is recorded as a hard requirement rather than silently assumed.",
         f"Source results after API filters: {report['source_counts_text']}",
         f"Unique recruit IDs inspected: {report['unique_candidate_count']}",
         f"Eligible non-logistics jobs: {len(normal_jobs)}",
         f"Eligible logistics groups: {len(logistics_jobs)}",
+        f"Eligible station-corridor evening candidates before commute screening: {report.get('eligible_late_night_count', len(late_night_jobs))}",
+        f"Eligible short-term remote jobs: {report.get('eligible_remote_count', len(remote_jobs))}",
+        f"Eligible Aug 15/17 one-day jobs: {report.get('eligible_temporary_single_day_count', len(temporary_single_day_jobs))}",
         f"Not yet applied: {len(actionable_jobs)}",
         f"Already applied: {len(already_applied_jobs)}",
         f"Authenticated application history checked: {report.get('application_history_checked_at') or 'not checked'}",
@@ -1195,8 +2219,9 @@ def write_combined_markdown(path: Path, report: dict[str, Any]) -> None:
         f"Detail candidates after safe early screening/dedup: {report.get('detail_candidate_count', report['unique_candidate_count'])}",
         f"Detail cache hits: {(report.get('performance') or {}).get('detail_cache_hits', 0)}",
         f"Detail network jobs: {(report.get('performance') or {}).get('detail_network_jobs', report['unique_candidate_count'])}",
-        "API verification: the 여름알바 and 급구알바 endpoints accept the same district, period, weekend-negotiation, gender, age, and education payload as 맞춤알바. Detail screening is still required because negotiated schedules and advertised locations are broad.",
-        "Utility ranking: schedule certainty, short commitment, pay, district proximity to Gangnam/Songpa, hard requirements, application friction, summer cold-work usefulness, and logistics-location certainty. Shift end time (including before/after 17:00 and overnight work) is neutral. District proximity uses transparent approximate bands rather than exact transit-time claims.",
+        "Source verification: 여름알바, 급구알바, 재택알바, and the exact six-station safety net are collected with the same short-term preferences where applicable. Detail screening remains authoritative because negotiated schedules and advertised locations are broad.",
+        f"Source parity: {(report.get('source_parity') or {}).get('multi_source_count', 0)} postings appeared in multiple source tabs; exclusive counts are retained in JSON for regression detection.",
+        "Utility ranking: schedule certainty, short commitment, pay, district proximity to Gangnam/Songpa, hard requirements, application friction, summer cold-work usefulness, and logistics-location certainty. Shift end time is neutral except that 19:00–02:00 containment is required for the station-corridor evening lane. District collection is only a prefilter; the unified report applies the conservative 20-minute station-area walking estimate and verifies the home commute separately.",
         "",
         "## Recommended application order",
         "",
@@ -1238,6 +2263,24 @@ def write_combined_markdown(path: Path, report: dict[str, Any]) -> None:
     lines.extend(
         [
             "",
+            "## Aug 15/17 one-day matches — one date can be worked independently",
+            "",
+            "> This temporary lane runs only on Aug 13–14, 2026 and expires automatically.",
+            "",
+        ]
+    )
+    if temporary_single_day_jobs:
+        for record in temporary_single_day_jobs:
+            lines.append(
+                f"- [{escape_markdown(record['title'])}]({record['url']}) — "
+                f"{escape_markdown(', '.join(record.get('target_date_options') or []))}; "
+                f"{escape_markdown(record['area'])}"
+            )
+    else:
+        lines.append("- None")
+    lines.extend(
+        [
+            "",
             "## Schedule reference — overnight shifts (not used in ranking)",
             "",
         ]
@@ -1246,6 +2289,43 @@ def write_combined_markdown(path: Path, report: dict[str, Any]) -> None:
         for record in overnight:
             lines.append(
                 f"- [{escape_markdown(record['title'])}]({record['url']}) — "
+                f"{escape_markdown(record['work_time'])}"
+            )
+    else:
+        lines.append("- None")
+    lines.extend(
+        [
+            "",
+            "## Station-corridor evening candidates — 19:00–02:00 shift; 20-minute station-area estimate checked in unified report",
+            "",
+            f"> Weekday is unrestricted, but all required work must finish by {report.get('availability_end_date')}. Confirm transport home using the exact advertised shift.",
+            "",
+        ]
+    )
+    if late_night_jobs:
+        for record in late_night_jobs:
+            lines.append(
+                f"- [{escape_markdown(record['title'])}]({record['url']}) — "
+                f"{escape_markdown('; '.join(record.get('late_night_shift_options') or []))}; "
+                f"{escape_markdown(record['area'])}"
+            )
+    else:
+        lines.append("- None")
+    lines.extend(
+        [
+            "",
+            "## Remote matches — hourly, short-term, and schedule-compatible",
+            "",
+            "> Remote jobs bypass commute routing but remain subject to pay, duration, description, privacy, and scam-signal checks.",
+            "",
+        ]
+    )
+    if remote_jobs:
+        for record in remote_jobs:
+            lines.append(
+                f"- [{escape_markdown(record['title'])}]({record['url']}) — "
+                f"{escape_markdown(record['salary_type'])} "
+                f"{escape_markdown(record['salary'])}; "
                 f"{escape_markdown(record['work_time'])}"
             )
     else:
@@ -1280,8 +2360,11 @@ def write_combined_markdown(path: Path, report: dict[str, Any]) -> None:
                     f"- Utility reasons: {escape_markdown('; '.join(record['utility_reasons']) or 'Eligible under all hard filters')}",
                     f"- Utility cautions: {escape_markdown('; '.join(record['utility_cautions']) or 'None identified from the posting')}",
                     f"- Source: {escape_markdown(source_names)}",
+                    f"- Eligibility lanes: {escape_markdown(', '.join(record.get('eligibility_lanes') or []))}",
                     f"- Area: {escape_markdown(record['area'])}",
                     f"- Schedule: {escape_markdown(record['work_week'] or record['work_days'])}; {escape_markdown(record['work_time'])}",
+                    f"- Matching night options: {escape_markdown('; '.join(record.get('late_night_shift_options') or []) or 'None')}",
+                    f"- Matching Aug 15/17 options: {escape_markdown(', '.join(record.get('target_date_options') or []) or 'None')}",
                     f"- Pay: {escape_markdown(record['salary_type'])} {escape_markdown(record['salary'])}",
                     f"- Ends before {report['end_time_threshold']}: {before_threshold_label(record)}",
                     f"- Commitment: {escape_markdown(record['duration_requirement'])}",
@@ -1408,7 +2491,7 @@ def write_combined_markdown(path: Path, report: dict[str, Any]) -> None:
                 f"- [{error['recruit_no']}]({error['url']}): {escape_markdown(error['error'])}"
             )
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    atomic_write_text(path, "\n".join(lines) + "\n")
 
 
 COMBINED_CSV_FIELDS = [
@@ -1426,6 +2509,8 @@ COMBINED_CSV_FIELDS = [
     "recruit_no",
     "duplicate_recruit_nos",
     "source_pages",
+    "eligibility_lanes",
+    "remote_job",
     "title",
     "company",
     "area",
@@ -1436,6 +2521,15 @@ COMBINED_CSV_FIELDS = [
     "work_days",
     "work_week",
     "work_time",
+    "weekend_shift_options",
+    "target_date_options",
+    "target_date_option_evidence",
+    "late_night_compatible",
+    "late_night_shift_options",
+    "late_night_availability",
+    "station_safety_nearest_station",
+    "station_safety_walk_minutes",
+    "station_safety_area_eligible",
     "start_time",
     "end_time",
     "ends_before_threshold",
@@ -1443,11 +2537,20 @@ COMBINED_CSV_FIELDS = [
     "early_shift_evidence",
     "duration_requirement",
     "duration_evidence",
+    "minimum_commitment_days",
+    "availability_window_start_date",
+    "availability_end_date",
+    "availability_window_days",
+    "availability_compatible",
+    "availability_compatibility_basis",
     "hard_requirements",
     "certificate_requirements",
     "preferences",
     "salary_type",
     "salary",
+    "structured_salary",
+    "salary_notes",
+    "salary_detail_evidence",
     "application_methods",
     "logistics_category",
     "cold_storage_status",
@@ -1468,7 +2571,9 @@ def csv_value(value: Any) -> str:
 
 def write_combined_csv(path: Path, records: list[dict[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8-sig", newline="") as csv_file:
+    with atomic_text_writer(
+        path, encoding="utf-8-sig", newline=""
+    ) as csv_file:
         writer = csv.DictWriter(csv_file, fieldnames=COMBINED_CSV_FIELDS)
         writer.writeheader()
         for record in records:
@@ -1483,6 +2588,37 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--page-size", type=int, default=DEFAULT_PAGE_SIZE)
     parser.add_argument("--workers", type=int, default=DEFAULT_WORKERS)
     parser.add_argument("--end-before", default="17:00")
+    parser.add_argument(
+        "--availability-end-date",
+        type=date.fromisoformat,
+        default=DEFAULT_AVAILABILITY_END_DATE,
+        help=(
+            "Last date on which work may be required (inclusive; default: "
+            f"{DEFAULT_AVAILABILITY_END_DATE.isoformat()})."
+        ),
+    )
+    parser.add_argument(
+        "--special-source-cache",
+        type=Path,
+        default=DEFAULT_SPECIAL_SOURCE_CACHE_PATH,
+        help="Cache for summer, urgent, remote, and station source membership.",
+    )
+    parser.add_argument(
+        "--special-source-cache-hours",
+        type=int,
+        default=DEFAULT_SPECIAL_SOURCE_CACHE_HOURS,
+        help="Refresh special-source membership after this many hours.",
+    )
+    parser.add_argument(
+        "--no-special-source-cache",
+        action="store_true",
+        help="Fetch all special-source membership on every run.",
+    )
+    parser.add_argument(
+        "--exclude-late-night",
+        action="store_true",
+        help="Omit the separate station-corridor 19:00-02:00 evening lane.",
+    )
     parser.add_argument(
         "--manual-reviews", type=Path, default=DEFAULT_MANUAL_REVIEWS_PATH
     )
@@ -1513,6 +2649,24 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Drop unseen detail-cache entries after this many days.",
     )
     parser.add_argument(
+        "--closing-refresh-hours",
+        type=int,
+        default=DEFAULT_CLOSING_REFRESH_HOURS,
+        help="Recheck unchanged eligible postings closing within 72 hours.",
+    )
+    parser.add_argument(
+        "--eligible-refresh-hours",
+        type=int,
+        default=DEFAULT_ELIGIBLE_REFRESH_HOURS,
+        help="Recheck other unchanged eligible postings after this many hours.",
+    )
+    parser.add_argument(
+        "--applied-refresh-hours",
+        type=int,
+        default=DEFAULT_APPLIED_REFRESH_HOURS,
+        help="Recheck unchanged already-applied postings after this many hours.",
+    )
+    parser.add_argument(
         "--checkpoint-every",
         type=int,
         default=100,
@@ -1534,12 +2688,24 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def run(args: argparse.Namespace) -> dict[str, Any]:
     if args.page_size < 1 or args.page_size > 10_000:
         raise ValueError("--page-size must be between 1 and 10000")
+    if args.special_source_cache_hours < 1:
+        raise ValueError("--special-source-cache-hours must be at least 1")
     if args.workers < 1 or args.workers > 32:
         raise ValueError("--workers must be between 1 and 32")
     if args.cache_ttl_days < 1:
         raise ValueError("--cache-ttl-days must be at least 1")
     if args.cache_retention_days < args.cache_ttl_days:
         raise ValueError("--cache-retention-days must be at least --cache-ttl-days")
+    if min(
+        args.closing_refresh_hours,
+        args.eligible_refresh_hours,
+        args.applied_refresh_hours,
+    ) < 1:
+        raise ValueError("detail refresh intervals must be at least 1 hour")
+    if args.closing_refresh_hours > args.eligible_refresh_hours:
+        raise ValueError(
+            "--closing-refresh-hours must not exceed --eligible-refresh-hours"
+        )
     if args.checkpoint_every < 1:
         raise ValueError("--checkpoint-every must be at least 1")
     if parse_clock_minutes(args.end_before) is None:
@@ -1556,7 +2722,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         )
         report.pop("closed_detail_recruit_nos", None)
         exclude_report_jobs_ending_on_or_before(
-            report, as_of=datetime.now().astimezone().date()
+            report,
+            as_of=datetime.now().astimezone(),
+            availability_end=args.availability_end_date,
         )
         annotate_report_with_application_history(
             report, load_applied_history(args.applied_history)
@@ -1570,10 +2738,18 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         suit_no=args.suit_no,
         page_size=args.page_size,
         performance_metrics=performance,
+        special_source_cache=(
+            None if args.no_special_source_cache else args.special_source_cache
+        ),
+        special_source_cache_hours=args.special_source_cache_hours,
+        include_late_night=not args.exclude_late_night,
     )
     screening_started = time.perf_counter()
     merged_jobs, source_map, exact_duplicates = merge_by_recruit_no(source_jobs)
-    detail_candidates, pre_detail_excluded_jobs = prefilter_search_jobs(merged_jobs)
+    source_parity = source_parity_summary(source_map)
+    detail_candidates, pre_detail_excluded_jobs = prefilter_search_jobs(
+        merged_jobs, source_map
+    )
     detail_candidates, pre_detail_duplicates = deduplicate_search_jobs(
         detail_candidates, source_map
     )
@@ -1589,23 +2765,11 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             args.detail_cache,
             excluded_ttl_days=args.cache_ttl_days,
             retention_days=args.cache_retention_days,
+            closing_refresh_hours=args.closing_refresh_hours,
+            eligible_refresh_hours=args.eligible_refresh_hours,
+            applied_refresh_hours=args.applied_refresh_hours,
             checkpoint_every=args.checkpoint_every,
         )
-    applied_ids = {
-        int(recruit_no) for recruit_no in (applied_history.get("jobs") or {})
-    }
-    force_refresh_ids = {
-        int(job["recruitNo"])
-        for job in detail_candidates
-        if {
-            int(job["recruitNo"]),
-            *(
-                int(value)
-                for value in job.get("_pre_detail_duplicate_recruit_nos") or []
-            ),
-        }
-        & applied_ids
-    }
     detail_started = time.perf_counter()
     records, detail_errors = fetch_records(
         detail_candidates,
@@ -1613,8 +2777,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         end_before=args.end_before,
         manual_reviews=load_manual_reviews(args.manual_reviews),
         detail_cache=detail_cache,
-        force_refresh_ids=force_refresh_ids,
         performance_metrics=performance,
+        persist_detail_cache=False,
     )
     performance["detail_stage_seconds"] = round(
         time.perf_counter() - detail_started, 3
@@ -1636,12 +2800,17 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     )
 
     classification_started = time.perf_counter()
-    as_of_date = datetime.now().astimezone().date()
+    observed_at = datetime.now().astimezone()
+    as_of_date = observed_at.date()
+    availability_end = args.availability_end_date
     eligible: list[dict[str, Any]] = []
     excluded: list[dict[str, Any]] = []
     for record in records:
         search_job = jobs_by_id.get(record["recruit_no"], {})
         record["source_pages"] = source_map.get(record["recruit_no"], [])
+        source_set = set(record["source_pages"])
+        record["remote_job"] = "remote" in source_set
+        record["station_safety_candidate"] = "station_safety" in source_set
         record["duplicate_recruit_nos"] = list(
             search_job.get("_pre_detail_duplicate_recruit_nos") or []
         )
@@ -1654,14 +2823,135 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         if effective_end and not record.get("work_term_end"):
             record["work_term_end"] = effective_end
             record["work_term_end_source"] = "posting title date range"
-        record["work_term_ended"] = work_term_ends_on_or_before(
-            effective_end, as_of=as_of_date
+        (
+            record["work_term_ended"],
+            record["work_term_expiry_basis"],
+        ) = record_work_term_has_expired(
+            record, observed_at=observed_at
         )
-        record["exclusion_reasons"] = combined_exclusion_reasons(record)
+        availability_reasons = availability_window_exclusion_reasons(
+            record, as_of=as_of_date, availability_end=availability_end
+        )
+        record["availability_window_start_date"] = as_of_date.isoformat()
+        record["availability_end_date"] = availability_end.isoformat()
+        record["availability_window_days"] = max(
+            0, (availability_end - as_of_date).days + 1
+        )
+        record["availability_compatible"] = not availability_reasons
+        record["availability_compatibility_basis"] = (
+            availability_reasons[0]
+            if availability_reasons
+            else availability_window_basis(
+                record, as_of=as_of_date, availability_end=availability_end
+            )
+        )
+        regular_reasons = combined_exclusion_reasons(
+            record, as_of=as_of_date, availability_end=availability_end
+        )
+        station_only = bool(source_set) and source_set <= {"station_safety"}
+        station_proximity = station_safety_proximity(record)
+        record["station_safety_nearest_station"] = station_proximity[
+            "nearest_station"
+        ]
+        record["station_safety_straight_line_km"] = station_proximity[
+            "straight_line_km"
+        ]
+        record["station_safety_walk_minutes"] = station_proximity["walk_minutes"]
+        record["station_safety_area_eligible"] = station_proximity["eligible"]
+        record["station_safety_area_basis"] = station_proximity["basis"]
+        if station_only and not station_proximity["eligible"]:
+            regular_reasons.append(
+                "station safety-net worksite is outside the 20-minute target: "
+                + station_proximity["basis"]
+            )
+        late_night_candidate = bool(
+            source_set.intersection({"late_night", "station_safety"})
+        )
+        night_reasons = (
+            late_night_exclusion_reasons(
+                record, as_of=as_of_date, availability_end=availability_end
+            )
+            if late_night_candidate
+            else []
+        )
+        if (
+            station_only
+            and late_night_candidate
+            and not station_proximity["eligible"]
+        ):
+            night_reasons.append(
+                "worksite is outside the 20-minute target-station estimate: "
+                + station_proximity["basis"]
+            )
+        remote_candidate = "remote" in source_set
+        remote_reasons = (
+            remote_exclusion_reasons(
+                record, as_of=as_of_date, availability_end=availability_end
+            )
+            if remote_candidate
+            else []
+        )
+        temporary_candidate = bool(
+            set(record.get("target_date_options") or [])
+            & {
+                target.isoformat()
+                for target in TEMPORARY_SINGLE_DAY_TARGET_DATES
+            }
+        )
+        temporary_reasons = (
+            temporary_single_day_exclusion_reasons(record, as_of=as_of_date)
+            if temporary_candidate
+            else []
+        )
+        record["weekend_lane_exclusion_reasons"] = regular_reasons
+        record["late_night_lane_exclusion_reasons"] = night_reasons
+        record["remote_lane_exclusion_reasons"] = remote_reasons
+        record["temporary_single_day_lane_exclusion_reasons"] = temporary_reasons
+        record["eligibility_lanes"] = []
+        if not regular_reasons:
+            record["eligibility_lanes"].append("weekend_short_term")
+        if late_night_candidate and not night_reasons:
+            record["eligibility_lanes"].append("songpa_late_night")
+        if remote_candidate and not remote_reasons:
+            record["eligibility_lanes"].append("remote_short_term")
+        if temporary_candidate and not temporary_reasons:
+            record["eligibility_lanes"].append(TEMPORARY_SINGLE_DAY_LANE)
+        record["exclusion_reasons"] = []
+        if not record["eligibility_lanes"]:
+            record["exclusion_reasons"].extend(regular_reasons)
+            record["exclusion_reasons"].extend(
+                f"Station-corridor evening lane: {reason}"
+                for reason in night_reasons
+                if reason not in regular_reasons
+            )
+            record["exclusion_reasons"].extend(
+                f"Remote lane: {reason}"
+                for reason in remote_reasons
+                if reason not in regular_reasons
+            )
+            record["exclusion_reasons"].extend(
+                f"Aug 15/17 single-day lane: {reason}"
+                for reason in temporary_reasons
+                if reason not in regular_reasons
+            )
         if record["exclusion_reasons"]:
             excluded.append(record)
         else:
             eligible.append(record)
+
+    excluded, expired_detail_records = prune_expired_audit_records(
+        excluded, observed_at=observed_at
+    )
+    pre_detail_excluded_jobs, expired_pre_detail_records = (
+        prune_expired_audit_records(
+            pre_detail_excluded_jobs, observed_at=observed_at
+        )
+    )
+    expired_recruit_nos = {
+        int(record["recruit_no"])
+        for record in [*expired_detail_records, *expired_pre_detail_records]
+        if isinstance(record.get("recruit_no"), int)
+    }
 
     deduplicated, semantic_duplicates = deduplicate_semantic(eligible)
     clinical_candidates = [
@@ -1701,12 +2991,30 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     )
     source_counts_text = ", ".join(
         f"{SOURCE_LABELS[source]} {source_totals[source]}"
-        for source in ("suit", "summer", "urgent")
+        for source in SOURCE_ORDER
+        if source in source_totals
     )
     report = {
+        "run_id": uuid.uuid4().hex,
         "generated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
         "sources": {
             "suit": f"{SITE_URL}/jobs/suit",
+            "multi_slot": (
+                f"{GENERAL_API_URL}/recruit/search "
+                "(서울 전체, 하루(1일), weekday unconstrained)"
+            ),
+            "late_night": (
+                f"{GENERAL_API_URL}/recruit/search "
+                "(강남구·서초구·송파구, short-term through the availability "
+                "deadline, any weekday; detail-verified 19:00-02:00; final "
+                "20-minute station-area screening)"
+            ),
+            "station_safety": (
+                f"{GENERAL_API_URL}/recruit/search "
+                "(exact 역삼·강남·송파·잠실·잠실새내·삼성 station tags; "
+                "list-level availability prefilter and coordinate verification)"
+            ),
+            "remote": REMOTE_URL,
             "summer": SUMMER_URL,
             "urgent": URGENT_URL,
             "search_api": f"{GENERAL_API_URL}/recruit/search",
@@ -1715,12 +3023,35 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "saved_condition": saved,
         "target_districts": list(TARGET_DISTRICTS),
         "collection_areas": ["서울 전체"],
+        "late_night_collection_area": "강남구·서초구·송파구 전체",
+        "late_night_station_corridor": list(EVENING_CORRIDOR_STATIONS),
+        "late_night_station_area_limit_minutes": EVENING_STATION_AREA_LIMIT_MINUTES,
+        "late_night_availability": LATE_NIGHT_AVAILABILITY,
+        "availability_window_start_date": as_of_date.isoformat(),
+        "availability_end_date": availability_end.isoformat(),
+        "availability_window_days": max(
+            0, (availability_end - as_of_date).days + 1
+        ),
+        "temporary_single_day_search": {
+            "active": as_of_date in TEMPORARY_SINGLE_DAY_ACTIVE_DATES,
+            "active_dates": sorted(
+                value.isoformat() for value in TEMPORARY_SINGLE_DAY_ACTIVE_DATES
+            ),
+            "target_dates": sorted(
+                value.isoformat() for value in TEMPORARY_SINGLE_DAY_TARGET_DATES
+            ),
+            "requires_independent_one_day_option": True,
+        },
         "requested_age": 26,
         "requested_gender": "male or unrestricted",
         "work_term_cutoff_date": as_of_date.isoformat(),
         "end_time_threshold": args.end_before,
         "utility_model": UTILITY_MODEL,
         "source_counts": source_totals,
+        "configured_source_names": [
+            source for source in SOURCE_ORDER if source in source_totals
+        ],
+        "source_parity": source_parity,
         "source_counts_text": source_counts_text,
         "source_result_count": sum(len(items) for items in source_jobs.values()),
         "unique_candidate_count": len(merged_jobs),
@@ -1733,9 +3064,26 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             exact_duplicates + pre_detail_duplicates + semantic_duplicates
         ),
         "eligible_count": len(normal_jobs) + len(logistics_jobs),
+        "eligible_late_night_count": sum(
+            "songpa_late_night" in (record.get("eligibility_lanes") or [])
+            for record in [*normal_jobs, *logistics_jobs]
+        ),
+        "eligible_remote_count": sum(
+            "remote_short_term" in (record.get("eligibility_lanes") or [])
+            for record in [*normal_jobs, *logistics_jobs]
+        ),
+        "eligible_temporary_single_day_count": sum(
+            TEMPORARY_SINGLE_DAY_LANE in (record.get("eligibility_lanes") or [])
+            for record in [*normal_jobs, *logistics_jobs]
+        ),
         "eligible_non_logistics_count": len(normal_jobs),
         "eligible_logistics_group_count": len(logistics_jobs),
         "excluded_count": len(excluded) + len(pre_detail_excluded_jobs),
+        "expired_jobs_flushed_count": len(expired_recruit_nos),
+        "expired_detail_jobs_flushed_count": len(expired_detail_records),
+        "expired_pre_detail_jobs_flushed_count": len(
+            expired_pre_detail_records
+        ),
         "exclusion_reason_counts": dict(exclusion_counts.most_common()),
         "jobs": normal_jobs,
         "logistics_jobs": logistics_jobs,
@@ -1768,12 +3116,22 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 record["recruit_no"],
                 "applied" if record.get("already_applied") else "eligible",
             )
+        detail_cache.remove_many(
+            {
+                int(error["recruit_no"])
+                for error in closed_detail_errors
+                if isinstance(error, dict)
+                and isinstance(error.get("recruit_no"), int)
+            },
+            reason="closed",
+        )
+        detail_cache.remove_many(expired_recruit_nos, reason="expired")
         detail_cache.prune(
             {
                 int(job["recruitNo"])
-                for job in merged_jobs
+                for job in detail_candidates
                 if isinstance(job.get("recruitNo"), int)
-            }
+            },
         )
         detail_cache.save()
         performance["detail_cache"] = detail_cache.metrics()
@@ -1789,8 +3147,9 @@ def write_combined_artifacts(prefix: Path, report: dict[str, Any]) -> None:
     """Write the JSON, CSV, and readable Markdown views of one report."""
 
     prefix.parent.mkdir(parents=True, exist_ok=True)
-    prefix.with_suffix(".json").write_text(
-        json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    atomic_write_text(
+        prefix.with_suffix(".json"),
+        json.dumps(report, ensure_ascii=False, indent=2) + "\n",
     )
     write_combined_csv(
         prefix.with_suffix(".csv"),
