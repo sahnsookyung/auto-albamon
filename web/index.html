@@ -1,0 +1,389 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light">
+    <title>JobScout — job decisions</title>
+    <link rel="stylesheet" href="/styles.css">
+    <script type="module" src="/app.js"></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#results">Skip to job results</a>
+    <header class="topbar">
+      <div class="brand-block">
+        <div class="brand-mark" aria-hidden="true">JS</div>
+        <div>
+          <div class="eyebrow">JOB DECISION DESK</div>
+          <h1>JobScout</h1>
+        </div>
+      </div>
+      <div class="topbar-actions">
+        <p class="refresh-state" id="refresh-state" aria-live="polite">Loading latest report…</p>
+        <nav class="report-links" id="report-links" aria-label="Download reports"></nav>
+        <button class="icon-button" id="reload-button" type="button" aria-label="Reload report" title="Reload report">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.34 5.66M20 4v7h-7"/></svg>
+        </button>
+      </div>
+    </header>
+
+    <main>
+      <nav class="desk-tabs" role="tablist" aria-label="Job source">
+        <button class="desk-tab is-active" id="albamon-desk-tab" type="button" role="tab" aria-selected="true" aria-controls="albamon-view">
+          <span>Albamon</span>
+          <small>Individual jobs</small>
+        </button>
+        <button class="desk-tab" id="hotels-desk-tab" type="button" role="tab" aria-selected="false" aria-controls="hotels-view">
+          <span>Hotel agencies</span>
+          <small>Pareto frontier</small>
+        </button>
+      </nav>
+
+      <section id="albamon-view" role="tabpanel" aria-labelledby="albamon-desk-tab">
+      <nav class="albamon-mode-tabs" aria-label="Albamon results scope">
+        <button class="albamon-mode-tab is-active" id="albamon-all-tab" type="button" aria-pressed="true">
+          <span>All matches</span>
+          <small>Complete ranked report</small>
+        </button>
+        <button class="albamon-mode-tab" id="albamon-pareto-tab" type="button" aria-pressed="false" aria-describedby="pareto-explainer">
+          <span>Pareto frontier</span>
+          <small><strong id="albamon-pareto-count">—</strong> unbeaten pay–commute choices</small>
+        </button>
+      </nav>
+      <section class="summary-strip" aria-label="Pipeline summary">
+        <article class="summary-card summary-card--accent">
+          <span class="summary-icon" aria-hidden="true">N</span>
+          <div><strong id="summary-new">—</strong><span>New matches</span></div>
+        </article>
+        <article class="summary-card">
+          <span class="summary-icon" aria-hidden="true">A</span>
+          <div><strong id="summary-actionable">—</strong><span>Ready to review</span></div>
+        </article>
+        <article class="summary-card">
+          <span class="summary-icon" aria-hidden="true">!</span>
+          <div><strong id="summary-attention">—</strong><span>Need attention</span></div>
+        </article>
+        <p class="pipeline-note" id="pipeline-note"></p>
+      </section>
+
+      <section class="filter-panel" aria-labelledby="filter-heading">
+        <div class="filter-heading-row">
+          <div>
+            <p class="eyebrow">SHORTLIST CONTROLS</p>
+            <h2 id="filter-heading">Find the right shift</h2>
+          </div>
+          <button class="text-button" id="clear-filters" type="button">Reset filters</button>
+        </div>
+        <div class="filters">
+          <label class="field field--search">
+            <span>Search</span>
+            <span class="input-shell">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg>
+              <input id="search-filter" type="search" placeholder="Company, role, or area" aria-keyshortcuts="/">
+              <kbd class="search-shortcut" aria-hidden="true">/</kbd>
+            </span>
+          </label>
+          <label class="field">
+            <span>Status</span>
+            <select id="status-filter">
+              <option value="apply">Actionable</option>
+              <option value="all">All statuses</option>
+              <option value="maybe_later">Maybe later</option>
+              <option value="do_not_apply">Skipped</option>
+              <option value="excluded_by_distance">Distance excluded</option>
+              <option value="applied">Already applied</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>Schedule match</span>
+            <select id="schedule-filter">
+              <option value="all">All schedules</option>
+              <option value="remote">Remote · flexible/weekend</option>
+              <option value="late_night">Station corridor · 19–02</option>
+              <option value="exact">Exact Sat or Sun</option>
+              <option value="negotiable">Negotiable weekend</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>Max commute</span>
+            <select id="commute-filter">
+              <option value="policy">Policy limit</option>
+              <option value="80">Under 80 min</option>
+              <option value="70">Under 70 min</option>
+              <option value="60">Under 60 min</option>
+              <option value="55">Under 55 min</option>
+              <option value="50">Under 50 min</option>
+              <option value="40">Under 40 min</option>
+              <option value="30">Under 30 min</option>
+              <option value="20">Under 20 min</option>
+              <option value="all">Any / unknown</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>Minimum hourly</span>
+            <select id="pay-filter">
+              <option value="0">Any pay</option>
+              <option value="12000">₩12,000+</option>
+              <option value="13000">₩13,000+</option>
+              <option value="14000">₩14,000+</option>
+              <option value="15000">₩15,000+</option>
+              <option value="18000">₩18,000+</option>
+              <option value="20000">₩20,000+</option>
+            </select>
+          </label>
+          <label class="field field--tradeoff" hidden>
+            <span>Trade-off view</span>
+            <select id="tradeoff-filter" aria-describedby="pareto-explainer">
+              <option value="all">All matches</option>
+              <option value="pareto">Pareto frontier</option>
+            </select>
+          </label>
+          <label class="field field--district">
+            <span>District</span>
+            <select id="district-filter">
+              <option value="all">All districts</option>
+            </select>
+          </label>
+          <label class="field field--zone">
+            <span>Priority zone</span>
+            <select id="zone-filter">
+              <option value="all">All zones</option>
+              <option value="remote">Remote · 재택</option>
+              <option value="core">Core · 강남/송파</option>
+              <option value="seocho_corridor">서초 · 방배/내방/반포/교대</option>
+              <option value="east_near_core">East · 강동/성동/광진</option>
+              <option value="premium_stretch">Premium · 용산/영등포</option>
+              <option value="outer_seoul">Outer Seoul</option>
+            </select>
+          </label>
+        </div>
+        <p class="pareto-explainer" id="pareto-explainer" hidden>
+          Keeps actionable jobs that no comparable option beats on both reliable hourly pay and verified commute. Remote and on-site work are compared separately.
+        </p>
+        <div class="filter-footer">
+          <div class="filter-toggles" aria-label="Quick constraints">
+            <label class="checkbox-field">
+              <input id="new-filter" type="checkbox">
+              <span>New in the last 24h</span>
+            </label>
+            <label class="checkbox-field">
+              <input id="closing-filter" type="checkbox">
+              <span>Closing within 72h</span>
+            </label>
+            <label class="checkbox-field">
+              <input id="requirements-filter" type="checkbox">
+              <span>No hard requirements</span>
+            </label>
+            <label class="checkbox-field">
+              <input id="easy-apply-filter" type="checkbox">
+              <span>Easy online apply</span>
+            </label>
+          </div>
+          <p class="filter-feedback" id="filter-feedback" aria-live="polite">Loading report jobs…</p>
+        </div>
+      </section>
+
+      <section class="workspace" aria-label="Job results and map">
+        <div class="view-tabs" role="tablist" aria-label="Result view">
+          <button class="view-tab is-active" id="table-tab" type="button" role="tab" aria-selected="true" aria-controls="results-panel">List</button>
+          <button class="view-tab" id="map-tab" type="button" role="tab" aria-selected="false" aria-controls="map-panel">Map</button>
+        </div>
+
+        <section class="results-panel" id="results-panel" aria-labelledby="results-heading">
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow" id="results-eyebrow">RANKED RESULTS</p>
+              <h2 id="results-heading"><span id="result-count">0</span> jobs</h2>
+            </div>
+            <div class="results-tools">
+              <button class="shortlist-filter-button" id="shortlist-filter" type="button" aria-pressed="false" disabled>
+                <span>Shortlist</span>
+                <strong id="shortlist-total">0</strong>
+              </button>
+              <label class="sort-field">
+                <span>Sort</span>
+                <select id="sort-filter">
+                  <option value="rank">Best match</option>
+                  <option value="zone">Zone priority</option>
+                  <option value="new">Newest first</option>
+                  <option value="pay">Highest pay</option>
+                  <option value="commute">Shortest commute</option>
+                  <option value="closing">Closing soon</option>
+                </select>
+              </label>
+            </div>
+          </div>
+          <div class="table-scroll" id="results" tabindex="0">
+            <table>
+              <thead>
+                <tr>
+                  <th class="shortlist-heading" scope="col">
+                    <span class="shortlist-heading-icon" aria-hidden="true">+</span>
+                    <span class="sr-only">Shortlist jobs to compare</span>
+                  </th>
+                  <th scope="col">Job</th>
+                  <th scope="col">Pay</th>
+                  <th scope="col">Schedule</th>
+                  <th scope="col">Commute</th>
+                  <th scope="col">Decision</th>
+                </tr>
+              </thead>
+              <tbody id="job-rows"></tbody>
+            </table>
+            <div class="empty-state" id="empty-state" hidden>
+              <span aria-hidden="true">◎</span>
+              <h3>No jobs match these filters</h3>
+              <p>Reset one or two filters to bring the shortlist back.</p>
+            </div>
+          </div>
+        </section>
+
+        <section class="map-panel" id="map-panel" aria-labelledby="map-heading">
+          <div class="panel-heading panel-heading--map">
+            <div>
+              <p class="eyebrow">WORKSITE MAP</p>
+              <h2 id="map-heading">Commute origin</h2>
+            </div>
+            <div class="map-legend" aria-label="Map legend">
+              <span><i class="dot dot--ready"></i>Actionable</span>
+              <span><i class="dot dot--selected"></i>Selected</span>
+            </div>
+          </div>
+          <div id="map" role="application" aria-label="Map of filtered Albamon worksites" hidden></div>
+          <div class="map-fallback" id="map-fallback">
+            <span class="map-loader" aria-hidden="true"></span>
+            <strong id="map-status-title">Map loads after the shortlist</strong>
+            <span id="map-status-message">The ranked table is ready first; worksite markers follow in the background.</span>
+          </div>
+          <p class="map-caption">Markers use Albamon’s actual worksite coordinates. Commute eligibility uses verified public transport—not straight-line distance.</p>
+        </section>
+      </section>
+      </section>
+
+      <section class="hotels-view" id="hotels-view" role="tabpanel" aria-labelledby="hotels-desk-tab" hidden>
+        <header class="hotel-hero">
+          <div>
+            <p class="eyebrow">SEPARATE WEEKEND-AGENCY REPORT</p>
+            <h2>Hotel agency Pareto frontier</h2>
+            <p>Compare each hotel’s best published rate against its verified commute from Jamsil. One hotel is efficient only when no other hotel pays at least as much with an equal or shorter commute.</p>
+          </div>
+          <nav class="report-links" id="hotel-report-links" aria-label="Download hotel reports"></nav>
+        </header>
+
+        <section class="hotel-summary" aria-label="Hotel report summary">
+          <article><strong id="hotel-summary-total">—</strong><span>Hotels compared</span></article>
+          <article><strong id="hotel-summary-frontier">—</strong><span>On this frontier</span></article>
+          <article><strong id="hotel-summary-pay">—</strong><span>Highest frontier pay</span></article>
+          <article><strong id="hotel-summary-weekly">—</strong><span>Hotels stating 주휴 rate</span></article>
+        </section>
+
+        <section class="hotel-frontier-panel" aria-labelledby="hotel-frontier-heading">
+          <div class="hotel-frontier-heading">
+            <div>
+              <p class="eyebrow">PAY ↑ · COMMUTE ↓</p>
+              <h2 id="hotel-frontier-heading">Efficient hotel choices</h2>
+            </div>
+            <div class="hotel-controls">
+              <div class="segmented-control" role="group" aria-label="Pareto pay basis">
+                <button class="is-active" id="hotel-pay-actual" type="button" aria-pressed="true">Actual pay</button>
+                <button id="hotel-pay-weekly" type="button" aria-pressed="false">With 주휴*</button>
+              </div>
+              <label class="checkbox-field hotel-show-all">
+                <input id="hotel-show-all" type="checkbox">
+                <span>Show all hotels</span>
+              </label>
+            </div>
+          </div>
+
+          <div class="hotel-basis-note" id="hotel-basis-note" role="status">
+            Using actual/base hourly pay. This is the reliable comparison and the ₩12,000 eligibility basis.
+          </div>
+          <div class="source-warning" id="hotel-source-warning" hidden></div>
+
+          <div class="hotel-frontier-layout">
+            <figure class="hotel-chart-card">
+              <figcaption>
+                <strong>Pay versus commute</strong>
+                <span>Gold points form the selected Pareto frontier; muted points are dominated.</span>
+              </figcaption>
+              <div class="hotel-chart" id="hotel-chart" role="img" aria-label="Scatter plot of hotel pay and verified commute">
+                <span class="map-loader" aria-hidden="true"></span>
+              </div>
+            </figure>
+
+            <section class="hotel-table-card" aria-labelledby="hotel-table-heading">
+              <div class="hotel-table-heading">
+                <div>
+                  <strong id="hotel-table-heading">Frontier hotels</strong>
+                  <span id="hotel-table-feedback" aria-live="polite">Loading the separate report…</span>
+                </div>
+              </div>
+              <div class="hotel-table-scroll">
+                <table>
+                  <thead>
+                    <tr>
+                      <th scope="col">Hotel</th>
+                      <th scope="col">Comparable pay</th>
+                      <th scope="col">Actual / 주휴*</th>
+                      <th scope="col">Commute</th>
+                      <th scope="col">Options</th>
+                    </tr>
+                  </thead>
+                  <tbody id="hotel-rows"></tbody>
+                </table>
+                <div class="empty-state" id="hotel-empty-state" hidden>
+                  <span aria-hidden="true">◎</span>
+                  <h3>Hotel report unavailable</h3>
+                  <p>Run the weekend-agency workflow, then reload this view.</p>
+                </div>
+              </div>
+            </section>
+          </div>
+          <p class="hotel-footnote">* 주휴 적용 시급 is conditional on satisfying the agency’s statutory/advertised eligibility. Where no 주휴 rate is published, the “With 주휴” comparison conservatively retains actual pay and labels it as an actual-pay fallback.</p>
+        </section>
+      </section>
+    </main>
+
+    <div class="drawer-scrim" id="drawer-scrim" hidden></div>
+    <aside class="detail-drawer" id="detail-drawer" aria-labelledby="detail-title" aria-hidden="true" inert>
+      <div class="drawer-header">
+        <div>
+          <p class="eyebrow" id="detail-kicker">JOB DETAILS</p>
+          <h2 id="detail-title">Select a job</h2>
+          <p id="detail-company"></p>
+        </div>
+        <button class="icon-button" id="close-drawer" type="button" aria-label="Close job details">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg>
+        </button>
+      </div>
+      <div class="drawer-body" id="drawer-body"></div>
+    </aside>
+
+    <section class="compare-tray" id="compare-tray" aria-label="Jobs selected for comparison" hidden>
+      <div class="compare-tray-copy">
+        <strong id="compare-count">0 selected</strong>
+        <div class="compare-chips" id="compare-chips"></div>
+      </div>
+      <div class="compare-tray-actions">
+        <button class="text-button" id="clear-compare" type="button">Clear</button>
+        <button class="primary-button" id="open-compare" type="button" disabled>Compare jobs</button>
+      </div>
+    </section>
+
+    <dialog class="compare-dialog" id="compare-dialog" aria-labelledby="compare-title">
+      <div class="compare-dialog-header">
+        <div>
+          <p class="eyebrow">SIDE-BY-SIDE</p>
+          <h2 id="compare-title">Compare shortlisted jobs</h2>
+        </div>
+        <button class="icon-button" id="close-compare" type="button" aria-label="Close comparison">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg>
+        </button>
+      </div>
+      <div class="comparison-grid" id="comparison-grid"></div>
+    </dialog>
+
+    <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+    <noscript>This dashboard needs JavaScript to filter and link the report to the map.</noscript>
+  </body>
+</html>
