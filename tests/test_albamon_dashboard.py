@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from datetime import date, datetime
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import ANY, patch
 
 from tools import albamon_dashboard
 from tools.albamon_dashboard import (
@@ -55,6 +55,140 @@ def unified_job(recruit_no: int, **overrides) -> dict:
 
 
 class AlbamonDashboardTests(unittest.TestCase):
+    def test_new_exploration_keeps_the_previous_immutable_download(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            runs = root / "runs"
+            runs.mkdir()
+            index_path = root / "index.json"
+            old_id = "a" * 20
+            new_id = "b" * 20
+            for report_id in (old_id, new_id):
+                for suffix in (".json", ".csv", ".md"):
+                    (runs / f"{report_id}{suffix}").write_text(
+                        f"{report_id}{suffix}\n", encoding="utf-8"
+                    )
+            index_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "searches": {
+                            "same-search": {
+                                "report_id": old_id,
+                                "generated_at": "2026-08-17T10:00:00+09:00",
+                            }
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with patch.multiple(
+                albamon_dashboard,
+                WEEKEND_AGENCY_EXPLORE_RUNS=runs,
+                WEEKEND_AGENCY_EXPLORE_INDEX=index_path,
+            ):
+                albamon_dashboard._publish_exploration_index(
+                    "same-search",
+                    report_id=new_id,
+                    generated_at="2026-08-17T11:00:00+09:00",
+                )
+
+            index = json.loads(index_path.read_text(encoding="utf-8"))
+            self.assertEqual(new_id, index["searches"]["same-search"]["report_id"])
+            self.assertTrue((runs / f"{old_id}.json").is_file())
+            self.assertTrue((runs / f"{new_id}.json").is_file())
+
+    def test_hotel_source_cache_is_not_invalidated_by_commute_origin(self):
+        dates = (date(2026, 8, 29), date(2026, 8, 30))
+        first_origin = {
+            "name": "First",
+            "address": "서울특별시 송파구 올림픽로 1",
+            "latitude": 37.51,
+            "longitude": 127.1,
+        }
+        second_origin = {
+            "name": "Second",
+            "address": "서울특별시 강남구 테헤란로 1",
+            "latitude": 37.5,
+            "longitude": 127.03,
+        }
+
+        self.assertNotEqual(
+            albamon_dashboard._exploration_signature(dates, origin=first_origin),
+            albamon_dashboard._exploration_signature(dates, origin=second_origin),
+        )
+        self.assertEqual(
+            albamon_dashboard._exploration_source_signature(dates),
+            albamon_dashboard._exploration_source_signature(tuple(reversed(dates))),
+        )
+
+    def test_origin_change_is_not_published_when_hotel_rerouting_fails(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            paths = {
+                "ALBAMON_REFRESH_LOCK": root / "albamon-refresh.lock",
+                "COMBINED_REPORT": root / "combined.json",
+                "ORIGIN_STATE_PATH": root / "origin.json",
+                "TRANSIT_CACHE": root / "transit.json",
+                "UNIFIED_REPORT": root / "unified.json",
+                "UNIFIED_PREFIX": root / "unified",
+                "MESSAGE_CACHE": root / "message.json",
+                "WEEKEND_AGENCY_REPORT": root / "weekend.json",
+                "WEEKEND_AGENCY_EXPLORE_INDEX": root / "explore-index.json",
+                "WEEKEND_LOCATION_CACHE": root / "locations.json",
+                "WEEKEND_ROUTE_CACHE": root / "routes.json",
+                "WEEKEND_REFRESH_LOCK": root / "weekend-refresh.lock",
+            }
+            paths["COMBINED_REPORT"].write_text('{"jobs": []}\n', encoding="utf-8")
+            paths["WEEKEND_AGENCY_REPORT"].write_text('{"jobs": []}\n', encoding="utf-8")
+            paths["WEEKEND_LOCATION_CACHE"].write_text("old-locations\n", encoding="utf-8")
+            paths["WEEKEND_ROUTE_CACHE"].write_text("old-routes\n", encoding="utf-8")
+            previous_origin = dict(albamon_dashboard.ORIGIN)
+
+            def fail_after_cache_side_effect(*_args, **_kwargs):
+                paths["WEEKEND_LOCATION_CACHE"].write_text("partial\n", encoding="utf-8")
+                paths["WEEKEND_ROUTE_CACHE"].write_text("partial\n", encoding="utf-8")
+                raise RuntimeError("hotel reroute failed")
+
+            with (
+                patch.multiple(albamon_dashboard, **paths),
+                patch.object(albamon_dashboard, "read_api_key", return_value="test-key"),
+                patch.object(
+                    albamon_dashboard,
+                    "build_cache",
+                    return_value={"unique_route_count": 1},
+                ),
+                patch.object(
+                    albamon_dashboard,
+                    "reroute_report",
+                    side_effect=fail_after_cache_side_effect,
+                ),
+                patch.object(albamon_dashboard, "save_commute_origin") as save_origin,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "hotel reroute failed"):
+                    albamon_dashboard.update_commute_origin(
+                        {
+                            "recalculate": True,
+                            "name": "Test origin",
+                            "address": "서울특별시 송파구 올림픽로 1",
+                            "latitude": 37.51,
+                            "longitude": 127.1,
+                        }
+                    )
+
+            save_origin.assert_not_called()
+            self.assertEqual(previous_origin, albamon_dashboard.ORIGIN)
+            self.assertFalse(paths["ORIGIN_STATE_PATH"].exists())
+            self.assertEqual(
+                "old-locations\n",
+                paths["WEEKEND_LOCATION_CACHE"].read_text(encoding="utf-8"),
+            )
+            self.assertEqual(
+                "old-routes\n",
+                paths["WEEKEND_ROUTE_CACHE"].read_text(encoding="utf-8"),
+            )
+
     def test_hotel_exploration_validates_a_bounded_future_range(self):
         today = date(2026, 8, 17)
 
@@ -118,6 +252,7 @@ class AlbamonDashboardTests(unittest.TestCase):
             report,
             now=datetime.fromisoformat("2026-08-17T12:00:00+09:00"),
             exploration=True,
+            report_id=ANY,
         )
 
     def test_changed_route_origin_hides_stale_minutes_and_actionability(self):
@@ -324,7 +459,7 @@ class AlbamonDashboardTests(unittest.TestCase):
         )
 
         by_name = {hotel["employer"]: hotel for hotel in payload["hotels"]}
-        self.assertEqual(1, payload["payload_version"])
+        self.assertEqual(2, payload["payload_version"])
         self.assertEqual({"actual": 3, "weekly_allowance": 2}, payload["summary"]["frontier_counts"])
         self.assertTrue(by_name["Far"]["pareto_actual"])
         self.assertFalse(by_name["Far"]["pareto_weekly_allowance"])
@@ -333,7 +468,7 @@ class AlbamonDashboardTests(unittest.TestCase):
         self.assertFalse(by_name["Near"]["weekly_allowance_rate_stated"])
         self.assertEqual(37.51, by_name["Near"]["latitude"])
         self.assertEqual(127.10, by_name["Near"]["longitude"])
-        self.assertEqual("잠실동 189-4", payload["origin"]["name"])
+        self.assertEqual(albamon_dashboard.ORIGIN["name"], payload["origin"]["name"])
 
     def test_weekend_agency_payload_hides_expired_date_rows(self):
         def row(work_date: str, employer: str) -> dict:

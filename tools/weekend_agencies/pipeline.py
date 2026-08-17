@@ -9,7 +9,7 @@ import time
 from dataclasses import replace
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 from zoneinfo import ZoneInfo
 
 try:
@@ -51,6 +51,13 @@ class PipelineError(RuntimeError):
 
 
 SOURCE_SNAPSHOT_MAX_AGE_HOURS = 8
+PipelineProgress = Callable[[str, int, int, dict[str, Any]], None]
+
+
+def _no_progress(
+    _stage: str, _completed: int, _total: int, _detail: dict[str, Any]
+) -> None:
+    return
 
 
 def default_sources() -> tuple[object, ...]:
@@ -270,14 +277,23 @@ def _collect_sources(
     search_dates: tuple[date, ...],
     weekends_only: bool,
     now: datetime,
+    progress: PipelineProgress = _no_progress,
 ) -> tuple[list[JobOffer], dict[str, dict[str, Any]]]:
     source_rows: list[JobOffer] = []
     source_metrics: dict[str, dict[str, Any]] = {}
     failures: dict[str, str] = {}
     source_snapshots = _load_source_snapshots(source_cache_path)
     snapshots_changed = False
-    for source in sources:
+    source_list = tuple(sources)
+    total_sources = len(source_list)
+    for source_index, source in enumerate(source_list, start=1):
         source_name = str(getattr(source, "name", type(source).__name__))
+        progress(
+            "source_start",
+            source_index - 1,
+            total_sources,
+            {"source": source_name},
+        )
         source_started = time.monotonic()
         try:
             fetch = getattr(source, "fetch")
@@ -325,6 +341,12 @@ def _collect_sources(
                 "snapshot_checked_at": snapshot_checked_at,
             }
             source_rows.extend(offers)
+            progress(
+                "source_complete",
+                source_index,
+                total_sources,
+                {"source": source_name, "status": "stale_cache", "offers": len(offers)},
+            )
             continue
         source_rows.extend(offers)
         metrics: dict[str, Any] = {
@@ -349,6 +371,12 @@ def _collect_sources(
             "offers": [item.as_dict() for item in offers],
         }
         snapshots_changed = True
+        progress(
+            "source_complete",
+            source_index,
+            total_sources,
+            {"source": source_name, "status": "live", "offers": len(offers)},
+        )
 
     if snapshots_changed:
         source_snapshots["updated_at"] = now.isoformat(timespec="seconds")
@@ -456,8 +484,15 @@ def run_pipeline(
     minimum_actual_hourly_won: int = MIN_ACTUAL_HOURLY_WON,
     now: datetime | None = None,
     write_outputs: bool = True,
+    origin: dict[str, Any] | None = None,
+    progress: PipelineProgress = _no_progress,
 ) -> tuple[dict[str, Any], dict[str, str]]:
     now = now or datetime.now(KOREA_TIMEZONE)
+    now = (
+        now.replace(tzinfo=KOREA_TIMEZONE)
+        if now.tzinfo is None
+        else now.astimezone(KOREA_TIMEZONE)
+    )
     if not search_dates:
         raise PipelineError("search_dates must not be empty")
     normalized_dates = tuple(sorted(set(search_dates)))
@@ -472,6 +507,7 @@ def run_pipeline(
         search_dates=normalized_dates,
         weekends_only=weekends_only,
         now=now,
+        progress=progress,
     )
 
     actionable = [
@@ -485,7 +521,13 @@ def run_pipeline(
             minimum_actual_hourly_won=minimum_actual_hourly_won,
         )
     ]
-    routed, routing_metrics = route_enricher(actionable, api_key=api_key)
+    progress("routing_start", 0, len(actionable), {"offers": len(actionable)})
+    route_parameters = inspect.signature(route_enricher).parameters
+    route_kwargs: dict[str, Any] = {"api_key": api_key}
+    if "origin" in route_parameters:
+        route_kwargs["origin"] = origin
+    routed, routing_metrics = route_enricher(actionable, **route_kwargs)
+    progress("routing_complete", len(actionable), len(actionable), routing_metrics)
     jobs = aggregate_offers(routed)
     report = _build_report(
         source_rows=source_rows,
@@ -511,10 +553,16 @@ def reroute_report(
     now: datetime | None = None,
     route_enricher: Any = attach_routes,
     write_outputs: bool = True,
+    origin: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], dict[str, str]]:
     """Recalculate a complete saved report without refetching source websites."""
 
     observed_at = now or datetime.now(KOREA_TIMEZONE)
+    observed_at = (
+        observed_at.replace(tzinfo=KOREA_TIMEZONE)
+        if observed_at.tzinfo is None
+        else observed_at.astimezone(KOREA_TIMEZONE)
+    )
     policy = report.get("policy") if isinstance(report.get("policy"), dict) else {}
     raw_dates = policy.get("search_dates") or policy.get("weekend_dates") or []
     try:
@@ -548,7 +596,11 @@ def reroute_report(
             minimum_actual_hourly_won=minimum_pay,
         )
     ]
-    routed, routing_metrics = route_enricher(actionable, api_key=api_key)
+    route_parameters = inspect.signature(route_enricher).parameters
+    route_kwargs: dict[str, Any] = {"api_key": api_key}
+    if "origin" in route_parameters:
+        route_kwargs["origin"] = origin
+    routed, routing_metrics = route_enricher(actionable, **route_kwargs)
     jobs = aggregate_offers(routed)
     rebuilt = _build_report(
         source_rows=source_rows,

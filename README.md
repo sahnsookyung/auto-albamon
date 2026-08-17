@@ -138,17 +138,35 @@ python3 tools/albamon_dashboard.py
 
 The Hotel agencies tab can run a separate, non-notifying exploration for any
 future date range up to 31 days. The selected range is saved in browser local
-storage, writes only to `artifacts/weekend-agencies/explore/`, and never changes
-the four fixed Discord monitoring dates. Rows whose work date is before the
-current local date are filtered from both report refreshes and dashboard
+storage, writes immutable results only to `artifacts/weekend-agencies/explore/`,
+and never changes the four fixed Discord monitoring dates. A normal search
+reuses an identical result for up to four hours; `Refresh sources` explicitly
+bypasses that cache. Network searches and origin recalculations run as bounded
+background operations with visible progress and cooperative cancellation, so
+the local HTTP server remains responsive. Rows whose work date is before the
+current Korea date are filtered from both report refreshes and dashboard
 projections.
 
-The dashboard shows the active commute origin above both data views. An address
-can be resolved with the shared Kakao free-tier ledger, or a coordinate can be
-selected directly from either map without an API call. A confirmed change is
-persisted to the ignored `tools/commute_origin.json`, invalidates route caches,
-and rebuilds Albamon plus available hotel reports. Kakao and Naver browser links
-are generated locally and do not consume an API quota.
+Hotel results can be narrowed by available date, an overnight-aware shift-time
+window, verified commute, actual/base or conditional 주휴 pay, role, provider,
+and hotel/provider text. The same exact-shift subset drives the table, map, and
+recomputed Pareto frontier. Filter sets persist locally, can be saved under a
+name, and can be copied into the dashboard URL. Each hotel exposes estimated
+shift earnings, an hourly rate after round-trip commute time, late-return risk,
+and pay-derivation warnings. Overlapping chart or map targets open a chooser
+instead of hiding one another, and source-health details distinguish live,
+cached, empty, disabled, and login-gated feeds. Report downloads appear once in
+the shared header.
+
+The dashboard shows the active commute origin above both data views. A fresh
+clone starts from the non-personal public landmark `잠실새내역`; a user's chosen
+origin remains only in the ignored `tools/commute_origin.json`. An address can
+be resolved with the shared Kakao free-tier ledger, or a coordinate can be
+selected directly from either map without an API call. A confirmed change first
+recalculates Albamon and hotel routes against the candidate, then publishes the
+origin, caches, and reports together. A failed recalculation restores the prior
+cache state and leaves the active origin unchanged. Kakao and Naver browser
+links are generated locally and do not consume an API quota.
 
 Then open <http://127.0.0.1:8765>. The server binds only to the local machine
 and has no additional Python dependencies. It reads the current combined,
@@ -450,7 +468,7 @@ application workflow. CSV contains the compact eligible set; Markdown is the
 readable report.
 
 Eligible jobs are sorted strictly by reliable comparable pay descending, then by
-verified public-transit minutes from 서울특별시 송파구 잠실동 189-4 ascending when
+verified public-transit minutes from the configured commute origin ascending when
 pay is equal.
 Before ranking, run the Kakao Maps web-UI pass from the configured origin and
 then regenerate the application report:
@@ -463,7 +481,7 @@ python3 tools/albamon_application_messages.py \
 ```
 
 Ordinary jobs prefer Kakao's official public-transit REST endpoint from
-서울특별시 송파구 잠실동 189-4 to the exact Albamon worksite. The endpoint has no
+the configured commute origin to the exact Albamon worksite. The endpoint has no
 future-departure parameter, so its result is recorded as a current route pattern
 and is not presented as an exact 10:00 timetable. Browser verification remains
 the fallback when the local free-call budget is unavailable, Kakao rejects the

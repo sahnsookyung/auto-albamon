@@ -56,7 +56,7 @@
         <form class="origin-editor" id="origin-editor" hidden>
           <label class="field origin-address-field">
             <span>Search a Korean address</span>
-            <input id="origin-address-input" type="search" maxlength="240" autocomplete="street-address" placeholder="e.g. 서울특별시 송파구 잠실동 189-4">
+            <input id="origin-address-input" type="search" maxlength="240" autocomplete="street-address" placeholder="e.g. 서울특별시 송파구 올림픽로 140">
           </label>
           <button class="secondary-button" id="origin-search-button" type="submit">Find address</button>
           <button class="secondary-button" id="origin-pin-button" type="button" aria-pressed="false">Drop pin on map</button>
@@ -335,9 +335,8 @@
           <div>
             <p class="eyebrow">SEPARATE WEEKEND-AGENCY REPORT</p>
             <h2>Hotel agency Pareto frontier</h2>
-            <p>Compare each hotel’s best published rate against its verified commute from Jamsil. One hotel is efficient only when no other hotel pays at least as much with an equal or shorter commute.</p>
+            <p>Compare each hotel’s best published rate against its verified commute from your selected origin. One hotel is efficient only when no other hotel pays at least as much with an equal or shorter commute.</p>
           </div>
-          <nav class="report-links" id="hotel-report-links" aria-label="Download hotel reports"></nav>
         </header>
 
         <section class="hotel-date-search" aria-labelledby="hotel-date-heading">
@@ -349,10 +348,47 @@
           <form id="hotel-date-form">
             <label class="field"><span>Start date</span><input id="hotel-start-date" type="date" required></label>
             <label class="field"><span>End date</span><input id="hotel-end-date" type="date" required></label>
-            <button class="primary-button" id="hotel-date-submit" type="submit">Search dates</button>
+            <button class="primary-button" id="hotel-date-submit" type="submit">Search cached dates</button>
+            <button class="secondary-button" id="hotel-date-refresh" type="button">Refresh sources</button>
             <button class="secondary-button" id="hotel-date-reset" type="button">Show monitored report</button>
           </form>
           <p class="hotel-date-status" id="hotel-date-status" aria-live="polite">Showing the monitored report.</p>
+          <div class="operation-progress" id="hotel-operation-progress" hidden>
+            <div>
+              <strong id="hotel-operation-message">Starting search…</strong>
+              <span id="hotel-operation-detail"></span>
+            </div>
+            <progress id="hotel-operation-meter" max="100" value="0">0%</progress>
+            <button class="text-button" id="hotel-operation-cancel" type="button">Cancel</button>
+          </div>
+        </section>
+
+        <section class="hotel-result-filters" aria-labelledby="hotel-filter-heading">
+          <div class="filter-heading-row">
+            <div>
+              <p class="eyebrow">RESULT FILTERS</p>
+              <h2 id="hotel-filter-heading">Narrow the available shifts</h2>
+            </div>
+            <div class="saved-search-actions">
+              <label class="field field--saved-search"><span>Saved view</span><select id="hotel-saved-search"><option value="">Current filters</option></select></label>
+              <button class="secondary-button" id="hotel-save-search" type="button">Save</button>
+              <button class="text-button" id="hotel-delete-search" type="button">Delete</button>
+              <button class="secondary-button" id="hotel-share-search" type="button">Copy link</button>
+              <button class="text-button" id="hotel-clear-filters" type="button">Reset filters</button>
+            </div>
+          </div>
+          <div class="hotel-filters">
+            <label class="field field--search"><span>Hotel or provider</span><input id="hotel-search-filter" type="search" placeholder="Hotel, area, role, provider"></label>
+            <label class="field"><span>Available from</span><input id="hotel-filter-start-date" type="date"></label>
+            <label class="field"><span>Available through</span><input id="hotel-filter-end-date" type="date"></label>
+            <label class="field"><span>Shift starts after</span><input id="hotel-shift-start" type="time"></label>
+            <label class="field"><span>Shift ends before</span><input id="hotel-shift-end" type="time"></label>
+            <label class="field"><span>Max commute</span><select id="hotel-commute-filter"><option value="">Any / unknown</option><option value="20">20 min</option><option value="30">30 min</option><option value="40">40 min</option><option value="50">50 min</option><option value="60">60 min</option><option value="75">75 min</option><option value="90">90 min</option></select></label>
+            <label class="field"><span>Minimum hourly</span><select id="hotel-min-pay-filter"><option value="12000">₩12,000+</option><option value="13000">₩13,000+</option><option value="14000">₩14,000+</option><option value="15000">₩15,000+</option><option value="18000">₩18,000+</option><option value="0">Any eligible pay</option></select></label>
+            <label class="field"><span>Role</span><select id="hotel-role-filter"><option value="all">All roles</option></select></label>
+            <label class="field"><span>Provider</span><select id="hotel-provider-filter"><option value="all">All providers</option></select></label>
+          </div>
+          <p class="filter-feedback" id="hotel-filter-feedback" aria-live="polite"></p>
         </section>
 
         <section class="hotel-summary" aria-label="Hotel report summary">
@@ -373,10 +409,6 @@
                 <button class="is-active" id="hotel-pay-actual" type="button" aria-pressed="true">Actual pay</button>
                 <button id="hotel-pay-weekly" type="button" aria-pressed="false">With 주휴*</button>
               </div>
-              <label class="checkbox-field hotel-show-all">
-                <input id="hotel-show-all" type="checkbox">
-                <span>Show all hotels</span>
-              </label>
             </div>
           </div>
 
@@ -423,7 +455,7 @@
             <section class="hotel-table-card" aria-labelledby="hotel-table-heading">
               <div class="hotel-table-heading">
                 <div>
-                  <strong id="hotel-table-heading">Frontier hotels</strong>
+                  <strong id="hotel-table-heading">All matching hotels</strong>
                   <span id="hotel-table-feedback" aria-live="polite">Loading the separate report…</span>
                 </div>
               </div>
@@ -459,6 +491,10 @@
             </div>
           </div>
           <p class="agency-catalog-note">Coverage badges distinguish successful public feeds, configured feeds awaiting dated listings, deliberately disabled low-yield sources, and agencies whose exact schedules remain login-gated.</p>
+          <details class="source-health-panel">
+            <summary>Source health and freshness</summary>
+            <div class="source-health-grid" id="hotel-source-health"></div>
+          </details>
           <div class="agency-catalog-scroll">
             <table>
               <thead>
@@ -501,6 +537,14 @@
           <button class="primary-button" id="origin-confirm-button" value="confirm">Confirm and recalculate</button>
         </div>
       </form>
+    </dialog>
+
+    <dialog class="point-choice-dialog" id="point-choice-dialog" aria-labelledby="point-choice-title">
+      <div class="compare-dialog-header">
+        <div><p class="eyebrow">SAME POSITION</p><h2 id="point-choice-title">Choose a result</h2></div>
+        <button class="icon-button" id="close-point-choice" type="button" aria-label="Close point choices"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button>
+      </div>
+      <div class="point-choice-list" id="point-choice-list"></div>
     </dialog>
 
     <section class="compare-tray" id="compare-tray" aria-label="Jobs selected for comparison" hidden>

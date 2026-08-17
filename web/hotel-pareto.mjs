@@ -22,6 +22,20 @@ export function isHotelOnFrontier(hotel, mode = "actual") {
   return hotel?.[config.frontierField] === true;
 }
 
+export function paretoHotelIds(hotels, mode = "actual") {
+  const candidates = (hotels || []).map((hotel) => ({
+    id: String(hotel?.hotel_id || ""),
+    pay: hotelComparablePay(hotel, mode),
+    commute: Number(hotel?.transit_minutes),
+  })).filter((item) => item.id && item.pay && Number.isFinite(item.commute));
+  return new Set(candidates.filter((candidate) => !candidates.some((other) =>
+    other.id !== candidate.id &&
+    other.pay >= candidate.pay &&
+    other.commute <= candidate.commute &&
+    (other.pay > candidate.pay || other.commute < candidate.commute)
+  )).map((item) => item.id));
+}
+
 function compactText(value) {
   return String(value ?? "").replace(/\s+/g, " ").trim();
 }
