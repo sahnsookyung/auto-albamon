@@ -23,11 +23,13 @@ from tools.albamon_transit import (
     job_coordinates,
     late_night_route_for_job,
     late_night_shift_ranges,
+    load_commute_origin,
     load_late_night_route_cache,
     merge_late_night_routes,
     reclassify_cache,
     read_kakao_route,
     route_cache_key,
+    save_commute_origin,
     summarize_route,
     valid_korean_coordinates,
 )
@@ -110,6 +112,23 @@ class AlbamonTransitTests(unittest.TestCase):
         self.assertEqual(2, pacer.wait.call_count)
         second_url = urlopen.call_args_list[1].args[0].full_url
         self.assertNotIn("%28", second_url)
+
+    def test_commute_origin_is_validated_persisted_and_loaded(self):
+        original = dict(ORIGIN)
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "origin.json"
+            candidate = {
+                "name": "강남역",
+                "address": "서울특별시 강남구 강남대로 396",
+                "latitude": 37.4979,
+                "longitude": 127.0276,
+            }
+            try:
+                saved = save_commute_origin(candidate, path=path)
+                self.assertEqual(candidate, saved)
+                self.assertEqual(candidate, load_commute_origin(path))
+            finally:
+                save_commute_origin(original, path=path)
 
     def test_kakao_request_pacer_spaces_calls_and_applies_shared_cooldown(self):
         clock = [10.0]
@@ -1013,6 +1032,7 @@ class AlbamonTransitTests(unittest.TestCase):
             api_key="test-key",
             address="삼각지",
             request_pacer=None,
+            quota_budget=None,
         )
 
 

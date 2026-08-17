@@ -10,11 +10,12 @@ from __future__ import annotations
 
 import argparse
 import gzip
+import hashlib
 import json
 import mimetypes
 import re
 import threading
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -25,18 +26,54 @@ try:
     from tools import albamon_application_messages as application_messages
     from tools.albamon_pareto import annotate_pareto_frontier
     from tools.albamon_runtime import atomic_write_text
-    from tools.albamon_transit import ORIGIN, cache_origin_matches
+    from tools.albamon_transit import (
+        DEFAULT_KAKAO_QUOTA_STATE,
+        DEFAULT_WORKERS,
+        ORIGIN,
+        KakaoQuotaBudget,
+        KakaoRequestPacer,
+        build_cache,
+        cache_origin_matches,
+        lookup_commute_origin,
+        origin_map_links,
+        save_commute_origin,
+        validate_commute_origin,
+    )
     from tools.albamon_discord import notification_identity, validate_report_pair
+    from tools.weekend_agencies.agencies import (
+        hotel_agency_catalog_payload,
+        hotel_agency_source_coverage_payload,
+    )
     from tools.weekend_agencies.hotel_digest import aggregate_hotels
     from tools.weekend_agencies.pareto import annotate_hotel_frontiers
+    from tools.weekend_agencies.pipeline import reroute_report, run_pipeline
+    from tools.weekend_agencies.routing import read_api_key
 except ModuleNotFoundError:  # Support ``python3 tools/albamon_dashboard.py``.
     import albamon_application_messages as application_messages
     from albamon_pareto import annotate_pareto_frontier
     from albamon_runtime import atomic_write_text
-    from albamon_transit import ORIGIN, cache_origin_matches
+    from albamon_transit import (
+        DEFAULT_KAKAO_QUOTA_STATE,
+        DEFAULT_WORKERS,
+        ORIGIN,
+        KakaoQuotaBudget,
+        KakaoRequestPacer,
+        build_cache,
+        cache_origin_matches,
+        lookup_commute_origin,
+        origin_map_links,
+        save_commute_origin,
+        validate_commute_origin,
+    )
     from albamon_discord import notification_identity, validate_report_pair
+    from weekend_agencies.agencies import (
+        hotel_agency_catalog_payload,
+        hotel_agency_source_coverage_payload,
+    )
     from weekend_agencies.hotel_digest import aggregate_hotels
     from weekend_agencies.pareto import annotate_hotel_frontiers
+    from weekend_agencies.pipeline import reroute_report, run_pipeline
+    from weekend_agencies.routing import read_api_key
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -48,7 +85,15 @@ TRANSIT_CACHE = ROOT / "tools/albamon_transit_cache.json"
 MESSAGE_CACHE = ROOT / "artifacts/albamon/cache/application_messages.json"
 DISCORD_STATE = ROOT / "artifacts/albamon/cache/discord_notifications.json"
 DISPOSITIONS = ROOT / "tools/albamon_application_dispositions.json"
+REVIEW_RESOLUTIONS = ROOT / "tools/albamon_review_resolutions.json"
 WEEKEND_AGENCY_REPORT = ROOT / "artifacts/weekend-agencies/latest.json"
+WEEKEND_AGENCY_EXPLORE_PREFIX = ROOT / "artifacts/weekend-agencies/explore/latest"
+WEEKEND_AGENCY_EXPLORE_REPORT = WEEKEND_AGENCY_EXPLORE_PREFIX.with_suffix(".json")
+WEEKEND_AGENCY_EXPLORE_SOURCE_CACHE = (
+    ROOT / "artifacts/weekend-agencies/explore/source_snapshots.json"
+)
+MAX_HOTEL_EXPLORATION_DAYS = 31
+ENV_FILE = ROOT / ".env"
 NEW_WINDOW_HOURS = 24
 CAPITAL_REGION_LATITUDE_BOUNDS = (36.8, 38.3)
 CAPITAL_REGION_LONGITUDE_BOUNDS = (125.8, 128.3)
@@ -62,6 +107,9 @@ REPORT_NAMES = {
     "weekend-agencies-latest.json": WEEKEND_AGENCY_REPORT,
     "weekend-agencies-latest.csv": WEEKEND_AGENCY_REPORT.with_suffix(".csv"),
     "weekend-agencies-latest.md": WEEKEND_AGENCY_REPORT.with_suffix(".md"),
+    "weekend-agencies-explore-latest.json": WEEKEND_AGENCY_EXPLORE_REPORT,
+    "weekend-agencies-explore-latest.csv": WEEKEND_AGENCY_EXPLORE_REPORT.with_suffix(".csv"),
+    "weekend-agencies-explore-latest.md": WEEKEND_AGENCY_EXPLORE_REPORT.with_suffix(".md"),
 }
 STATIC_NAMES = {
     "/": WEB_ROOT / "index.html",
@@ -147,6 +195,11 @@ SUMMARY_JOB_FIELDS = (
     "notified_at",
     "is_new",
     "is_closing_soon",
+    "needs_review_reason",
+    "review_reason_summary",
+    "review_resolution_status",
+    "review_resolved_at",
+    "review_resolution_note",
     "logistics_category",
 )
 _CACHE_SIGNATURE: tuple[tuple[int, int], ...] | None = None
@@ -154,6 +207,8 @@ _CACHE_PAYLOAD: dict[str, Any] | None = None
 _CACHE_DETAILS: dict[int, dict[str, Any]] | None = None
 _HOTEL_CACHE_SIGNATURE: tuple[int, int] | None = None
 _HOTEL_CACHE_PAYLOAD: dict[str, Any] | None = None
+_HOTEL_EXPLORE_CACHE_SIGNATURE: tuple[int, int] | None = None
+_HOTEL_EXPLORE_CACHE_PAYLOAD: dict[str, Any] | None = None
 
 
 class DashboardDataError(RuntimeError):
@@ -194,6 +249,10 @@ def _combined_records(report: dict[str, Any]) -> list[dict[str, Any]]:
     ]
 
 
+def _public_origin() -> dict[str, Any]:
+    return {**dict(ORIGIN), "map_links": origin_map_links()}
+
+
 def _notification_metadata(
     combined_record: dict[str, Any], state: dict[str, Any]
 ) -> dict[str, str]:
@@ -229,6 +288,77 @@ def _weekend_evidence_type(record: dict[str, Any]) -> str:
     return "negotiable" if "negotiable" in basis or "협의" in work_days else "exact"
 
 
+def _requirement_review_fingerprint(record: dict[str, Any]) -> str:
+    evidence = {
+        "send_readiness": record.get("send_readiness"),
+        "fit_warning": record.get("fit_warning"),
+        "hard_requirements": record.get("hard_requirements") or [],
+        "certificate_requirements": record.get("certificate_requirements") or [],
+        "verify_before_sending": record.get("verify_before_sending") or [],
+    }
+    encoded = json.dumps(
+        evidence,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()[:20]
+
+
+def _matching_review_resolution(
+    record: dict[str, Any], review_state: dict[str, Any]
+) -> dict[str, Any]:
+    if record.get("send_readiness") != "conditional_on_requirement":
+        return {}
+    jobs = review_state.get("jobs") if isinstance(review_state, dict) else None
+    if not isinstance(jobs, dict):
+        return {}
+    entry = jobs.get(str(record.get("recruit_no")))
+    if not isinstance(entry, dict):
+        return {}
+    if (
+        entry.get("status") == "requirements_verified"
+        and entry.get("requirements_fingerprint")
+        == _requirement_review_fingerprint(record)
+    ):
+        return entry
+    return {}
+
+
+def _needs_review_reason(
+    record: dict[str, Any], review_resolution: dict[str, Any] | None = None
+) -> str:
+    """Return one actionable review reason instead of counting settled skips."""
+
+    disposition = str(record.get("application_disposition") or "")
+    if disposition == "maybe_later":
+        return "deferred"
+    if (
+        disposition == "apply"
+        and record.get("send_readiness") == "conditional_on_requirement"
+        and not review_resolution
+    ):
+        return "verify_requirements"
+    return ""
+
+
+def _review_reason_summary(record: dict[str, Any], reason: str) -> str:
+    if reason == "deferred":
+        return str(record.get("disposition_reason") or "You marked this job Maybe later")
+    if reason != "verify_requirements":
+        return ""
+    requirements = [
+        " ".join(str(value).split())
+        for value in record.get("hard_requirements") or []
+        if str(value).strip()
+    ]
+    if requirements:
+        return "; ".join(requirements[:3])
+    warning = " ".join(str(record.get("fit_warning") or "").split())
+    return warning or "Check an unverified posting condition"
+
+
 def _has_plausible_map_coordinates(record: dict[str, Any]) -> bool:
     try:
         latitude = float(record.get("latitude"))
@@ -257,13 +387,18 @@ def build_dashboard_payload(
     combined_report: dict[str, Any],
     unified_report: dict[str, Any],
     discord_state: dict[str, Any] | None = None,
+    review_state: dict[str, Any] | None = None,
     *,
     now: datetime | None = None,
 ) -> dict[str, Any]:
     """Build the compact initial payload used by the table and map."""
 
     payload, _details = build_dashboard_snapshot(
-        combined_report, unified_report, discord_state, now=now
+        combined_report,
+        unified_report,
+        discord_state,
+        now=now,
+        review_state=review_state,
     )
     return payload
 
@@ -275,6 +410,7 @@ def build_dashboard_snapshot(
     *,
     now: datetime | None = None,
     route_origin_current: bool = True,
+    review_state: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], dict[int, dict[str, Any]]]:
     """Join decision, location, deadline, and notification data for the UI."""
 
@@ -282,6 +418,7 @@ def build_dashboard_snapshot(
     if observed_at.tzinfo is None:
         observed_at = observed_at.astimezone()
     state = discord_state or {}
+    reviews = review_state or {}
     combined_by_id = {
         int(record["recruit_no"]): record for record in _combined_records(combined_report)
     }
@@ -366,6 +503,20 @@ def build_dashboard_snapshot(
         )
         for field, value in commute_policy.items():
             job.setdefault(field, value)
+        review_resolution = _matching_review_resolution(job, reviews)
+        job["review_resolution_status"] = str(
+            review_resolution.get("status") or ""
+        )
+        job["review_resolved_at"] = str(
+            review_resolution.get("resolved_at") or ""
+        )
+        job["review_resolution_note"] = str(
+            review_resolution.get("note") or ""
+        )
+        job["needs_review_reason"] = _needs_review_reason(job, review_resolution)
+        job["review_reason_summary"] = _review_reason_summary(
+            job, job["needs_review_reason"]
+        )
         jobs.append(job)
 
     pareto_frontier_count = annotate_pareto_frontier(jobs)
@@ -373,10 +524,21 @@ def build_dashboard_snapshot(
     summary = {
         "new_actionable_count": sum(bool(job["is_new"]) for job in actionable),
         "actionable_count": len(actionable),
+        "actionable_clear_count": sum(
+            not job["needs_review_reason"] for job in actionable
+        ),
         "closing_soon_count": sum(bool(job["is_closing_soon"]) for job in actionable),
-        "needs_review_count": sum(
-            job.get("send_readiness") == "conditional_on_requirement"
-            or job.get("application_disposition") in {"maybe_later", "do_not_apply"}
+        "needs_review_count": sum(bool(job["needs_review_reason"]) for job in jobs),
+        "needs_review_breakdown": {
+            "verify_requirements": sum(
+                job["needs_review_reason"] == "verify_requirements" for job in jobs
+            ),
+            "deferred": sum(
+                job["needs_review_reason"] == "deferred" for job in jobs
+            ),
+        },
+        "requirements_verified_count": sum(
+            job["review_resolution_status"] == "requirements_verified"
             for job in jobs
         ),
         "already_applied_count": sum(
@@ -419,7 +581,7 @@ def build_dashboard_snapshot(
         ),
         "notification_state_updated_at": str(state.get("updated_at") or ""),
         "new_window_hours": NEW_WINDOW_HOURS,
-        "origin": ORIGIN,
+        "origin": _public_origin(),
         "route_origin_current": route_origin_current,
         "summary": summary,
         "pareto": {
@@ -453,6 +615,7 @@ def _dashboard_signature() -> tuple[tuple[int, int], ...]:
         _path_signature(UNIFIED_REPORT),
         _path_signature(DISCORD_STATE, optional=True),
         _path_signature(TRANSIT_CACHE, optional=True),
+        _path_signature(REVIEW_RESOLUTIONS, optional=True),
     )
 
 
@@ -489,11 +652,17 @@ def load_dashboard_snapshot() -> tuple[dict[str, Any], dict[int, dict[str, Any]]
             if DISCORD_STATE.exists()
             else {}
         )
+        review_state = (
+            load_json_object(REVIEW_RESOLUTIONS, label="Review resolutions")
+            if REVIEW_RESOLUTIONS.exists()
+            else {}
+        )
         payload, details = build_dashboard_snapshot(
             combined,
             unified,
             state,
             route_origin_current=cache_origin_matches(transit_cache),
+            review_state=review_state,
         )
         _CACHE_SIGNATURE = signature
         _CACHE_PAYLOAD = payload
@@ -506,16 +675,54 @@ def load_dashboard_payload() -> dict[str, Any]:
     return payload
 
 
-def build_weekend_agency_payload(report: dict[str, Any]) -> dict[str, Any]:
+def build_weekend_agency_payload(
+    report: dict[str, Any],
+    *,
+    now: datetime | None = None,
+    exploration: bool = False,
+) -> dict[str, Any]:
     """Build the lazy-loaded, hotel-level dashboard projection."""
 
     jobs = report.get("jobs") or []
     if not isinstance(jobs, list):
         raise DashboardDataError("Weekend agency report jobs must be a list")
-    hotels = aggregate_hotels(job for job in jobs if isinstance(job, dict))
+    observed_date = (now or datetime.now().astimezone()).date()
+    current_jobs: list[dict[str, Any]] = []
+    for job in jobs:
+        if not isinstance(job, dict):
+            continue
+        try:
+            work_date = date.fromisoformat(str(job.get("work_date") or ""))
+        except ValueError:
+            continue
+        if work_date >= observed_date:
+            current_jobs.append(job)
+    hotels = aggregate_hotels(current_jobs)
     frontier_counts = annotate_hotel_frontiers(hotels)
     sources = report.get("sources") if isinstance(report.get("sources"), dict) else {}
     policy = report.get("policy") if isinstance(report.get("policy"), dict) else {}
+    report_catalog = report.get("agency_catalog")
+    current_catalog = hotel_agency_catalog_payload()
+    report_catalog_by_id = {
+        str(entry.get("agency_id") or ""): dict(entry)
+        for entry in report_catalog or []
+        if isinstance(entry, dict) and entry.get("agency_id")
+    }
+    agency_catalog = []
+    for current in current_catalog:
+        merged = {**current, **report_catalog_by_id.get(current["agency_id"], {})}
+        merged.pop("routine_competition", None)
+        agency_catalog.append(merged)
+    report_coverage = report.get("agency_source_coverage")
+    agency_source_coverage = hotel_agency_source_coverage_payload()
+    if isinstance(report_coverage, dict):
+        agency_source_coverage.update(
+            {
+                str(agency_id): dict(entry)
+                for agency_id, entry in report_coverage.items()
+                if isinstance(entry, dict)
+            }
+        )
     return {
         "payload_version": 1,
         "run_id": str(report.get("run_id") or ""),
@@ -523,12 +730,18 @@ def build_weekend_agency_payload(report: dict[str, Any]) -> dict[str, Any]:
         "all_sources_live": bool(report.get("all_sources_live")),
         "integrity_checks_passed": bool(report.get("integrity_checks_passed")),
         "policy": policy,
+        "origin": _public_origin(),
+        "exploration": exploration,
+        "monitored_dates": ["2026-08-29", "2026-08-30", "2026-09-05", "2026-09-06"],
         "sources": sources,
+        "agency_catalog": agency_catalog,
+        "agency_source_coverage": agency_source_coverage,
         "summary": {
             "hotel_count": len(hotels),
-            "job_count": len(jobs),
-            "cross_agency_duplicate_count": int(
-                (report.get("counts") or {}).get("cross_agency_duplicates") or 0
+            "job_count": len(current_jobs),
+            "expired_job_count_hidden": len(jobs) - len(current_jobs),
+            "cross_agency_duplicate_count": sum(
+                bool(job.get("cross_agency_duplicate")) for job in current_jobs
             ),
             "frontier_counts": frontier_counts,
             "weekly_allowance_rate_count": sum(
@@ -544,9 +757,30 @@ def build_weekend_agency_payload(report: dict[str, Any]) -> dict[str, Any]:
         },
         "hotels": hotels,
         "reports": [
-            {"label": "Markdown", "url": "/reports/weekend-agencies-latest.md"},
-            {"label": "CSV", "url": "/reports/weekend-agencies-latest.csv"},
-            {"label": "JSON", "url": "/reports/weekend-agencies-latest.json"},
+            {
+                "label": "Markdown",
+                "url": (
+                    "/reports/weekend-agencies-explore-latest.md"
+                    if exploration
+                    else "/reports/weekend-agencies-latest.md"
+                ),
+            },
+            {
+                "label": "CSV",
+                "url": (
+                    "/reports/weekend-agencies-explore-latest.csv"
+                    if exploration
+                    else "/reports/weekend-agencies-latest.csv"
+                ),
+            },
+            {
+                "label": "JSON",
+                "url": (
+                    "/reports/weekend-agencies-explore-latest.json"
+                    if exploration
+                    else "/reports/weekend-agencies-latest.json"
+                ),
+            },
         ],
     }
 
@@ -564,6 +798,149 @@ def load_weekend_agency_payload() -> dict[str, Any]:
         _HOTEL_CACHE_SIGNATURE = signature
         _HOTEL_CACHE_PAYLOAD = payload
         return payload
+
+
+def _search_dates_from_payload(
+    payload: dict[str, Any], *, today: date
+) -> tuple[date, ...]:
+    try:
+        start = date.fromisoformat(str(payload.get("start_date") or ""))
+        end = date.fromisoformat(str(payload.get("end_date") or ""))
+    except ValueError as exc:
+        raise ValueError("Use valid ISO start and end dates") from exc
+    if start < today:
+        raise ValueError("Search start cannot be earlier than today")
+    if end < start:
+        raise ValueError("Search end must not precede search start")
+    if (end - start).days + 1 > MAX_HOTEL_EXPLORATION_DAYS:
+        raise ValueError(
+            f"Search at most {MAX_HOTEL_EXPLORATION_DAYS} days at a time"
+        )
+    return tuple(start + timedelta(days=offset) for offset in range((end - start).days + 1))
+
+
+def search_weekend_agencies(
+    payload: dict[str, Any], *, now: datetime | None = None
+) -> dict[str, Any]:
+    """Run a non-notifying, independently cached hotel date exploration."""
+
+    global _HOTEL_EXPLORE_CACHE_SIGNATURE, _HOTEL_EXPLORE_CACHE_PAYLOAD
+    observed_at = now or datetime.now().astimezone()
+    search_dates = _search_dates_from_payload(payload, today=observed_at.date())
+    with WRITE_LOCK:
+        if WEEKEND_AGENCY_EXPLORE_REPORT.exists() and payload.get("force") is not True:
+            cached = load_json_object(
+                WEEKEND_AGENCY_EXPLORE_REPORT, label="Hotel exploration report"
+            )
+            policy = cached.get("policy") if isinstance(cached.get("policy"), dict) else {}
+            generated_at = _parse_datetime(cached.get("generated_at"))
+            if (
+                policy.get("search_dates")
+                == [value.isoformat() for value in search_dates]
+                and policy.get("weekends_only") is False
+                and generated_at is not None
+                and observed_at - generated_at <= timedelta(hours=4)
+            ):
+                return build_weekend_agency_payload(
+                    cached, now=observed_at, exploration=True
+                )
+        report, _paths = run_pipeline(
+            api_key=read_api_key(ENV_FILE),
+            output_prefix=WEEKEND_AGENCY_EXPLORE_PREFIX,
+            source_cache_path=WEEKEND_AGENCY_EXPLORE_SOURCE_CACHE,
+            search_dates=search_dates,
+            weekends_only=False,
+            now=observed_at,
+        )
+        result = build_weekend_agency_payload(
+            report, now=observed_at, exploration=True
+        )
+        _HOTEL_EXPLORE_CACHE_SIGNATURE = _path_signature(
+            WEEKEND_AGENCY_EXPLORE_REPORT
+        )
+        _HOTEL_EXPLORE_CACHE_PAYLOAD = result
+        return result
+
+
+def resolve_origin_address(payload: dict[str, Any]) -> dict[str, Any]:
+    api_key = read_api_key(ENV_FILE)
+    if not api_key:
+        raise ValueError("KAKAO_REST_API_KEY is required for address search")
+    quota_path = (
+        DEFAULT_KAKAO_QUOTA_STATE
+        if DEFAULT_KAKAO_QUOTA_STATE.is_absolute()
+        else ROOT / DEFAULT_KAKAO_QUOTA_STATE
+    )
+    origin = lookup_commute_origin(
+        api_key=api_key,
+        query=str(payload.get("query") or ""),
+        quota_budget=KakaoQuotaBudget(quota_path),
+        request_pacer=KakaoRequestPacer(),
+    )
+    return {"origin": {**origin, "map_links": origin_map_links(origin)}}
+
+
+def update_commute_origin(payload: dict[str, Any]) -> dict[str, Any]:
+    """Persist a confirmed origin and rebuild every origin-dependent report."""
+
+    global _HOTEL_CACHE_SIGNATURE, _HOTEL_CACHE_PAYLOAD
+    global _HOTEL_EXPLORE_CACHE_SIGNATURE, _HOTEL_EXPLORE_CACHE_PAYLOAD
+    if payload.get("recalculate") is not True:
+        raise ValueError("Confirm commute recalculation before changing the origin")
+    candidate = validate_commute_origin(payload)
+    api_key = read_api_key(ENV_FILE)
+    if not api_key:
+        raise ValueError("KAKAO_REST_API_KEY is required to recalculate commutes")
+    quota_path = (
+        DEFAULT_KAKAO_QUOTA_STATE
+        if DEFAULT_KAKAO_QUOTA_STATE.is_absolute()
+        else ROOT / DEFAULT_KAKAO_QUOTA_STATE
+    )
+    with WRITE_LOCK:
+        saved = save_commute_origin(candidate)
+        combined = load_json_object(COMBINED_REPORT, label="Combined report")
+        existing_cache = (
+            load_json_object(TRANSIT_CACHE, label="Transit cache")
+            if TRANSIT_CACHE.exists()
+            else None
+        )
+        cache = build_cache(
+            combined,
+            api_key=api_key,
+            workers=DEFAULT_WORKERS,
+            existing_cache=existing_cache,
+            quota_budget=KakaoQuotaBudget(quota_path),
+            defer_unverified_routes=True,
+        )
+        atomic_write_text(
+            TRANSIT_CACHE,
+            json.dumps(cache, ensure_ascii=False, indent=2) + "\n",
+        )
+        rebuild_unified_report()
+
+        rerouted_reports: list[str] = []
+        for report_path, prefix in (
+            (WEEKEND_AGENCY_REPORT, WEEKEND_AGENCY_REPORT.with_suffix("")),
+            (WEEKEND_AGENCY_EXPLORE_REPORT, WEEKEND_AGENCY_EXPLORE_PREFIX),
+        ):
+            if not report_path.exists():
+                continue
+            report = load_json_object(report_path, label="Hotel agency report")
+            reroute_report(report, api_key=api_key, output_prefix=prefix)
+            rerouted_reports.append(report_path.name)
+        _HOTEL_CACHE_SIGNATURE = None
+        _HOTEL_CACHE_PAYLOAD = None
+        _HOTEL_EXPLORE_CACHE_SIGNATURE = None
+        _HOTEL_EXPLORE_CACHE_PAYLOAD = None
+    return {
+        "ok": True,
+        "origin": {**saved, "map_links": origin_map_links(saved)},
+        "albamon_routes": int(cache.get("unique_route_count") or 0),
+        "webui_fallback_required": int(
+            cache.get("webui_fallback_required_count") or 0
+        ),
+        "rerouted_hotel_reports": rerouted_reports,
+    }
 
 
 def load_job_detail(recruit_no: int) -> dict[str, Any] | None:
@@ -626,6 +1003,67 @@ def write_disposition(
     )
 
 
+def write_review_resolution(
+    path: Path,
+    recruit_no: int,
+    action: str,
+    requirements_fingerprint: str,
+    note: str = "",
+    *,
+    allowed_recruit_nos: set[int] | None = None,
+    now: datetime | None = None,
+) -> None:
+    """Persist or reopen a requirement acknowledgement for one exact job."""
+
+    if recruit_no <= 0 or (
+        allowed_recruit_nos is not None and recruit_no not in allowed_recruit_nos
+    ):
+        raise ValueError("Unknown job ID")
+    if action not in {"confirm_requirements", "reopen_requirements"}:
+        raise ValueError("Unsupported review action")
+    clean_note = " ".join(str(note or "").split())
+    if len(clean_note) > 500:
+        raise ValueError("Review note must be 500 characters or fewer")
+    if action == "confirm_requirements" and not requirements_fingerprint:
+        raise ValueError("Requirement evidence fingerprint is missing")
+
+    payload: dict[str, Any]
+    if path.exists():
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            raise ValueError("Review resolutions must contain a JSON object")
+    else:
+        payload = {"version": 1, "jobs": {}}
+    jobs = payload.setdefault("jobs", {})
+    if not isinstance(jobs, dict):
+        raise ValueError("Review resolutions must contain a jobs object")
+    if allowed_recruit_nos is not None:
+        for key in list(jobs):
+            try:
+                active = int(key) in allowed_recruit_nos
+            except (TypeError, ValueError):
+                active = False
+            if not active:
+                jobs.pop(key, None)
+    key = str(recruit_no)
+    if action == "reopen_requirements":
+        jobs.pop(key, None)
+    else:
+        jobs[key] = {
+            "status": "requirements_verified",
+            "requirements_fingerprint": requirements_fingerprint,
+            "resolved_at": (now or datetime.now().astimezone()).isoformat(
+                timespec="seconds"
+            ),
+            "note": clean_note,
+        }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_text(
+        path,
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+    )
+
+
 def rebuild_unified_report() -> None:
     """Regenerate every existing unified report format after a disposition edit."""
 
@@ -670,6 +1108,47 @@ def update_job_disposition(payload: dict[str, Any]) -> dict[str, Any]:
         )
         rebuild_unified_report()
     return {"ok": True, "recruit_no": recruit_no, "status": status}
+
+
+def update_review_resolution(payload: dict[str, Any]) -> dict[str, Any]:
+    try:
+        recruit_no = int(payload.get("recruit_no"))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Job ID must be an integer") from exc
+    action = str(payload.get("action") or "")
+    note = str(payload.get("note") or "")
+    with WRITE_LOCK:
+        unified = load_json_object(UNIFIED_REPORT, label="Unified report")
+        current_jobs = [
+            record for record in unified.get("jobs") or [] if isinstance(record, dict)
+        ]
+        job = next(
+            (
+                record
+                for record in current_jobs
+                if int(record.get("recruit_no") or 0) == recruit_no
+            ),
+            None,
+        )
+        if job is None:
+            raise ValueError("Unknown job ID")
+        if action == "confirm_requirements" and not (
+            job.get("application_disposition") == "apply"
+            and job.get("send_readiness") == "conditional_on_requirement"
+        ):
+            raise ValueError("This job does not have an open requirement review")
+        write_review_resolution(
+            REVIEW_RESOLUTIONS,
+            recruit_no,
+            action,
+            _requirement_review_fingerprint(job),
+            note,
+            allowed_recruit_nos={
+                int(record.get("recruit_no") or 0) for record in current_jobs
+            },
+        )
+        _invalidate_dashboard_cache()
+    return {"ok": True, "recruit_no": recruit_no, "action": action}
 
 
 def _host_is_local(value: str) -> bool:
@@ -806,7 +1285,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
         if self._reject_nonlocal_request():
             return
-        if urlparse(self.path).path != "/api/dispositions":
+        path = urlparse(self.path).path
+        if path not in {
+            "/api/dispositions",
+            "/api/reviews",
+            "/api/weekend-agencies/search",
+            "/api/origin/lookup",
+            "/api/origin",
+        }:
             self._send_json({"error": "Not found"}, HTTPStatus.NOT_FOUND)
             return
         if self.headers.get_content_type() != "application/json":
@@ -823,8 +1309,24 @@ class DashboardHandler(BaseHTTPRequestHandler):
             payload = json.loads(self.rfile.read(length).decode("utf-8"))
             if not isinstance(payload, dict):
                 raise ValueError("Request body must contain a JSON object")
-            result = update_job_disposition(payload)
-        except (DashboardDataError, json.JSONDecodeError, UnicodeDecodeError, ValueError) as exc:
+            if path == "/api/reviews":
+                result = update_review_resolution(payload)
+            elif path == "/api/dispositions":
+                result = update_job_disposition(payload)
+            elif path == "/api/weekend-agencies/search":
+                result = search_weekend_agencies(payload)
+            elif path == "/api/origin/lookup":
+                result = resolve_origin_address(payload)
+            else:
+                result = update_commute_origin(payload)
+        except (
+            DashboardDataError,
+            json.JSONDecodeError,
+            UnicodeDecodeError,
+            ValueError,
+            RuntimeError,
+            OSError,
+        ) as exc:
             self._send_json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
             return
         self._send_json(result)

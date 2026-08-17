@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Store and reclassify Kakao routes from Jamsil-dong 189-4.
+"""Store and reclassify Kakao routes from a user-selected commute origin.
 
 Ordinary commute checks prefer Kakao's documented REST route endpoint. A
 persistent, fail-closed daily budget keeps scheduled calls below the published
@@ -46,12 +46,81 @@ DEFAULT_INPUT = Path("artifacts/albamon/latest-combined.json")
 DEFAULT_OUTPUT = Path("tools/albamon_transit_cache.json")
 DEFAULT_LATE_NIGHT_OUTPUT = Path("tools/albamon_late_night_route_cache.json")
 DEFAULT_WORKERS = 6
-ORIGIN = {
+ORIGIN_STATE_PATH = Path(__file__).with_name("commute_origin.json")
+DEFAULT_ORIGIN = {
     "name": "잠실동 189-4",
     "address": "서울특별시 송파구 잠실동 189-4",
     "latitude": 37.5099418,
     "longitude": 127.0823805,
 }
+
+
+def validate_commute_origin(payload: dict[str, Any]) -> dict[str, Any]:
+    """Validate and normalize a persisted user-selected route origin."""
+
+    name = " ".join(str(payload.get("name") or "").split())
+    address = " ".join(str(payload.get("address") or "").split())
+    if not name or len(name) > 100:
+        raise ValueError("Origin name must be between 1 and 100 characters")
+    if not address or len(address) > 240:
+        raise ValueError("Origin address must be between 1 and 240 characters")
+    try:
+        latitude = float(payload.get("latitude"))
+        longitude = float(payload.get("longitude"))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Origin coordinates must be numeric") from exc
+    if not (33.0 <= latitude <= 39.5 and 124.0 <= longitude <= 132.0):
+        raise ValueError("Origin coordinates must be within South Korea")
+    return {
+        "name": name,
+        "address": address,
+        "latitude": latitude,
+        "longitude": longitude,
+    }
+
+
+def load_commute_origin(path: Path = ORIGIN_STATE_PATH) -> dict[str, Any]:
+    if not path.exists():
+        return dict(DEFAULT_ORIGIN)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            raise ValueError("origin state must be a JSON object")
+        return validate_commute_origin(payload)
+    except (OSError, json.JSONDecodeError, ValueError):
+        return dict(DEFAULT_ORIGIN)
+
+
+ORIGIN = load_commute_origin()
+
+
+def save_commute_origin(
+    payload: dict[str, Any], *, path: Path = ORIGIN_STATE_PATH
+) -> dict[str, Any]:
+    """Atomically persist an origin and update this process immediately."""
+
+    normalized = validate_commute_origin(payload)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_text(
+        path,
+        json.dumps(normalized, ensure_ascii=False, indent=2) + "\n",
+    )
+    ORIGIN.clear()
+    ORIGIN.update(normalized)
+    return dict(ORIGIN)
+
+
+def origin_map_links(origin: dict[str, Any] | None = None) -> dict[str, str]:
+    value = validate_commute_origin(origin or ORIGIN)
+    label = urllib.parse.quote(value["name"], safe="")
+    address = urllib.parse.quote(value["address"], safe="")
+    return {
+        "kakao": (
+            "https://map.kakao.com/link/map/"
+            f"{label},{value['latitude']},{value['longitude']}"
+        ),
+        "naver": f"https://map.naver.com/p/search/{address}",
+    }
 MAX_TRANSIT_MINUTES = 50
 DEFAULT_ROUTE_CACHE_HOURS = 24
 DEFAULT_ROUTE_REFRESH_HOUR = 10
@@ -504,6 +573,7 @@ def geocode_address(
     address: str,
     timeout: int = 15,
     request_pacer: KakaoRequestPacer | None = None,
+    quota_budget: KakaoQuotaBudget | None = None,
 ) -> tuple[float, float]:
     for candidate in geocode_query_candidates(address):
         query = urllib.parse.urlencode({"query": candidate})
@@ -514,14 +584,72 @@ def geocode_address(
                 "User-Agent": "JobScout/1.0",
             },
         )
-        if request_pacer is not None:
-            request_pacer.wait()
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            payload = json.loads(response.read().decode("utf-8"))
-        documents = payload.get("documents") or []
-        if documents:
-            return float(documents[0]["y"]), float(documents[0]["x"])
+        for attempt in range(2):
+            try:
+                if request_pacer is not None:
+                    request_pacer.wait()
+                if quota_budget is not None:
+                    quota_budget.reserve()
+                with urllib.request.urlopen(request, timeout=timeout) as response:
+                    payload = json.loads(response.read().decode("utf-8"))
+                documents = payload.get("documents") or []
+                if documents:
+                    return float(documents[0]["y"]), float(documents[0]["x"])
+                break
+            except urllib.error.HTTPError as exc:
+                error_code = kakao_error_code(exc)
+                if error_code == -10 and attempt == 0:
+                    if request_pacer is not None:
+                        request_pacer.defer(KAKAO_RATE_LIMIT_COOLDOWN_SECONDS)
+                    else:
+                        time.sleep(KAKAO_RATE_LIMIT_COOLDOWN_SECONDS)
+                    continue
+                if exc.code == 429 or error_code in {-10, -11}:
+                    if quota_budget is not None:
+                        quota_budget.mark_remote_exhausted(
+                            f"quota_{error_code}" if error_code is not None else "quota_429"
+                        )
+                    raise KakaoQuotaExhausted(
+                        "Kakao address lookup limit reached; manual map pin required"
+                    ) from exc
+                if exc.code in {401, 403}:
+                    if quota_budget is not None:
+                        quota_budget.mark_remote_exhausted(
+                            f"http_{exc.code}_code_{error_code}"
+                        )
+                    raise KakaoApiUnavailable(
+                        "Kakao address lookup access rejected; manual map pin required"
+                    ) from exc
+                raise
     raise RuntimeError("worksite address could not be geocoded")
+
+
+def lookup_commute_origin(
+    *,
+    api_key: str,
+    query: str,
+    quota_budget: KakaoQuotaBudget,
+    request_pacer: KakaoRequestPacer | None = None,
+) -> dict[str, Any]:
+    """Resolve an exact user-entered address through the shared free-tier ledger."""
+
+    clean = " ".join(str(query or "").split())
+    if not clean or len(clean) > 240:
+        raise ValueError("Enter an address between 1 and 240 characters")
+    latitude, longitude = geocode_address(
+        api_key=api_key,
+        address=clean,
+        request_pacer=request_pacer,
+        quota_budget=quota_budget,
+    )
+    return validate_commute_origin(
+        {
+            "name": clean,
+            "address": clean,
+            "latitude": latitude,
+            "longitude": longitude,
+        }
+    )
 
 
 def job_coordinates(
@@ -529,6 +657,7 @@ def job_coordinates(
     *,
     api_key: str,
     request_pacer: KakaoRequestPacer | None = None,
+    quota_budget: KakaoQuotaBudget | None = None,
 ) -> tuple[float, float]:
     latitude = job.get("latitude")
     longitude = job.get("longitude")
@@ -551,6 +680,7 @@ def job_coordinates(
         api_key=api_key,
         address=address,
         request_pacer=request_pacer,
+        quota_budget=quota_budget,
     )
 
 
@@ -602,6 +732,7 @@ def assess_job(
             job,
             api_key=api_key,
             request_pacer=request_pacer,
+            quota_budget=quota_budget,
         )
         payload = read_kakao_route(
             api_key=api_key,

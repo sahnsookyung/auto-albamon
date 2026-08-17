@@ -95,3 +95,32 @@ test("shortlist filtering and easy-apply checks stay independent", () => {
 
   assert.deepEqual(filtered.map((item) => item.recruit_no), [1]);
 });
+
+test("needs-review status shows only jobs with an explicit review reason", () => {
+  const jobs = [
+    job(1, { needs_review_reason: "verify_requirements" }),
+    job(2, { application_disposition: "maybe_later", needs_review_reason: "deferred" }),
+    job(3, { application_disposition: "do_not_apply", needs_review_reason: "" }),
+  ];
+
+  const filtered = filterAndSortJobModels(
+    buildJobViewModels(jobs),
+    criteria({ status: "needs_review", commutePolicyOnly: false }),
+  );
+
+  assert.deepEqual(filtered.map((item) => item.recruit_no), [1, 2]);
+});
+
+test("requirement-review status excludes deferred decisions", () => {
+  const jobs = [
+    job(1, { needs_review_reason: "verify_requirements" }),
+    job(2, { application_disposition: "maybe_later", needs_review_reason: "deferred" }),
+  ];
+
+  const filtered = filterAndSortJobModels(
+    buildJobViewModels(jobs),
+    criteria({ status: "review_requirements", commutePolicyOnly: false }),
+  );
+
+  assert.deepEqual(filtered.map((item) => item.recruit_no), [1]);
+});

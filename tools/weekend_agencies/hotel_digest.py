@@ -28,8 +28,10 @@ ROLE_LABELS = {
 }
 SOURCE_SHORT_LABELS = {
     "withyou": "위드유",
-    "huplux": "휴플럭스",
+    "huplux": "후플럭스",
     "eumplus": "이음",
+    "eoullim": "어울림",
+    "rutine": "루틴",
 }
 
 
@@ -232,6 +234,21 @@ def aggregate_hotels(jobs: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
             for row in rows
             if isinstance(row.get("transit_minutes"), int)
         ]
+        location_candidates = [
+            item
+            for item in [*offers, *rows]
+            if isinstance(item.get("latitude"), (int, float))
+            and isinstance(item.get("longitude"), (int, float))
+        ]
+        location = min(
+            location_candidates,
+            key=lambda item: (
+                int(item.get("transit_minutes"))
+                if isinstance(item.get("transit_minutes"), int)
+                else 10_000
+            ),
+            default={},
+        )
         max_actual = max(actual_values, default=None)
         best_agencies = sorted(
             str(item["agency"])
@@ -255,6 +272,9 @@ def aggregate_hotels(jobs: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
                 "daytime_actual_hourly_max": max(daytime_values, default=None),
                 "weekly_allowance_hourly_max": max(weekly_values, default=None),
                 "transit_minutes": min(commute_values, default=None),
+                "latitude": location.get("latitude"),
+                "longitude": location.get("longitude"),
+                "location_basis": location.get("location_basis") or "",
                 "dates": dates,
                 "date_count": len(dates),
                 "shift_count": len({str(row.get("shift") or "") for row in rows}),

@@ -39,31 +39,96 @@
         </button>
       </nav>
 
+      <section class="origin-control" aria-labelledby="origin-heading">
+        <div class="origin-summary">
+          <span class="origin-symbol" aria-hidden="true">◎</span>
+          <div>
+            <p class="eyebrow">COMMUTE ORIGIN</p>
+            <h2 id="origin-heading"><span id="origin-name">Loading…</span></h2>
+            <p><span id="origin-address">Loading address…</span> · <span id="origin-coordinates"></span></p>
+          </div>
+        </div>
+        <div class="origin-actions">
+          <a class="secondary-button" id="origin-kakao-link" target="_blank" rel="noopener noreferrer">Kakao Map</a>
+          <a class="secondary-button" id="origin-naver-link" target="_blank" rel="noopener noreferrer">Naver Map</a>
+          <button class="primary-button" id="origin-edit-button" type="button">Change origin</button>
+        </div>
+        <form class="origin-editor" id="origin-editor" hidden>
+          <label class="field origin-address-field">
+            <span>Search a Korean address</span>
+            <input id="origin-address-input" type="search" maxlength="240" autocomplete="street-address" placeholder="e.g. 서울특별시 송파구 잠실동 189-4">
+          </label>
+          <button class="secondary-button" id="origin-search-button" type="submit">Find address</button>
+          <button class="secondary-button" id="origin-pin-button" type="button" aria-pressed="false">Drop pin on map</button>
+          <button class="text-button" id="origin-cancel-button" type="button">Cancel</button>
+          <div class="origin-candidate" id="origin-candidate" hidden>
+            <strong id="origin-candidate-name"></strong>
+            <span id="origin-candidate-address"></span>
+            <small id="origin-candidate-coordinates"></small>
+            <button class="primary-button" id="origin-use-button" type="button">Use this origin</button>
+          </div>
+          <p class="origin-help" id="origin-help">Address search uses the existing Kakao free-tier budget. Pin drop itself makes no API call.</p>
+        </form>
+      </section>
+
       <section id="albamon-view" role="tabpanel" aria-labelledby="albamon-desk-tab">
-      <nav class="albamon-mode-tabs" aria-label="Albamon results scope">
-        <button class="albamon-mode-tab is-active" id="albamon-all-tab" type="button" aria-pressed="true">
-          <span>All matches</span>
-          <small>Complete ranked report</small>
-        </button>
-        <button class="albamon-mode-tab" id="albamon-pareto-tab" type="button" aria-pressed="false" aria-describedby="pareto-explainer">
-          <span>Pareto frontier</span>
-          <small><strong id="albamon-pareto-count">—</strong> unbeaten pay–commute choices</small>
-        </button>
-      </nav>
       <section class="summary-strip" aria-label="Pipeline summary">
-        <article class="summary-card summary-card--accent">
+        <button class="summary-card" id="summary-new-card" type="button" aria-pressed="false">
           <span class="summary-icon" aria-hidden="true">N</span>
-          <div><strong id="summary-new">—</strong><span>New matches</span></div>
-        </article>
-        <article class="summary-card">
+          <div>
+            <strong id="summary-new">—</strong>
+            <span>New in 24h</span>
+            <small>Actionable jobs first seen during the last 24 hours</small>
+          </div>
+        </button>
+        <button class="summary-card" id="summary-actionable-card" type="button" aria-pressed="false">
           <span class="summary-icon" aria-hidden="true">A</span>
-          <div><strong id="summary-actionable">—</strong><span>Ready to review</span></div>
-        </article>
-        <article class="summary-card">
+          <div>
+            <strong id="summary-actionable">—</strong>
+            <span>Actionable matches</span>
+            <small id="summary-actionable-detail">Passed automatic eligibility filters</small>
+          </div>
+        </button>
+        <button class="summary-card" id="summary-attention-card" type="button" aria-pressed="false">
           <span class="summary-icon" aria-hidden="true">!</span>
-          <div><strong id="summary-attention">—</strong><span>Need attention</span></div>
-        </article>
+          <div>
+            <strong id="summary-attention">—</strong>
+            <span>Manual review queue</span>
+            <small id="summary-attention-detail">Posting-condition checks or deferred decisions</small>
+          </div>
+        </button>
         <p class="pipeline-note" id="pipeline-note"></p>
+      </section>
+
+      <section class="queue-guide" aria-labelledby="queue-guide-heading">
+        <div class="queue-guide-heading">
+          <div>
+            <p class="eyebrow">DECISION QUEUES</p>
+            <h2 id="queue-guide-heading">What each counter means</h2>
+          </div>
+          <span>Click a counter or a button below to show that exact queue.</span>
+        </div>
+        <div class="queue-guide-grid">
+          <article>
+            <strong>New in 24h</strong>
+            <p>A subset of actionable jobs first recorded by JobScout during the rolling 24-hour window. The “New” badge expires automatically; it is not a decision state.</p>
+            <button class="text-button queue-filter-button" type="button" data-queue-filter="new">Show new jobs</button>
+          </article>
+          <article>
+            <strong>Actionable matches</strong>
+            <p>Jobs that passed the automated date, schedule, pay, commute, worksite, and exclusion rules. Some can still require a manual posting-condition check.</p>
+            <button class="text-button queue-filter-button" type="button" data-queue-filter="actionable">Show actionable jobs</button>
+          </article>
+          <article>
+            <strong>Manual review queue</strong>
+            <p>Either a posting condition JobScout cannot confirm—such as eligibility, exact worksite, or a certificate—or a job you deliberately deferred with “Maybe later.”</p>
+            <div class="queue-guide-actions">
+              <button class="text-button queue-filter-button" type="button" data-queue-filter="requirements">Posting-condition checks</button>
+              <button class="text-button queue-filter-button" type="button" data-queue-filter="deferred">Deferred decisions</button>
+            </div>
+          </article>
+        </div>
+        <p class="queue-resolution-note"><strong>Resolving a review:</strong> open the job and complete the stated check. Marking it complete removes that exact evidence version from this queue; changed evidence reopens it. A deferred job leaves the queue when you restore it to actionable or skip it. Albamon application history removes applied jobs automatically.</p>
       </section>
 
       <section class="filter-panel" aria-labelledby="filter-heading">
@@ -86,9 +151,11 @@
           <label class="field">
             <span>Status</span>
             <select id="status-filter">
-              <option value="apply">Actionable</option>
+              <option value="apply">Actionable matches</option>
               <option value="all">All statuses</option>
-              <option value="maybe_later">Maybe later</option>
+              <option value="needs_review">Manual review · all</option>
+              <option value="review_requirements">Manual review · posting conditions</option>
+              <option value="maybe_later">Deferred · maybe later</option>
               <option value="do_not_apply">Skipped</option>
               <option value="excluded_by_distance">Distance excluded</option>
               <option value="applied">Already applied</option>
@@ -131,13 +198,6 @@
               <option value="20000">₩20,000+</option>
             </select>
           </label>
-          <label class="field field--tradeoff" hidden>
-            <span>Trade-off view</span>
-            <select id="tradeoff-filter" aria-describedby="pareto-explainer">
-              <option value="all">All matches</option>
-              <option value="pareto">Pareto frontier</option>
-            </select>
-          </label>
           <label class="field field--district">
             <span>District</span>
             <select id="district-filter">
@@ -157,9 +217,6 @@
             </select>
           </label>
         </div>
-        <p class="pareto-explainer" id="pareto-explainer" hidden>
-          Keeps actionable jobs that no comparable option beats on both reliable hourly pay and verified commute. Remote and on-site work are compared separately.
-        </p>
         <div class="filter-footer">
           <div class="filter-toggles" aria-label="Quick constraints">
             <label class="checkbox-field">
@@ -265,7 +322,9 @@
             <strong id="map-status-title">Map loads after the shortlist</strong>
             <span id="map-status-message">The ranked table is ready first; worksite markers follow in the background.</span>
           </div>
-          <div class="albamon-pareto-chart" id="albamon-pareto-chart" role="img" aria-label="Scatter plot of Albamon hourly pay and verified commute" hidden></div>
+          <div class="albamon-pareto-chart" id="albamon-pareto-chart" role="group" aria-label="Interactive scatter plot of Albamon hourly pay and verified commute" hidden>
+            <div class="pareto-tooltip" id="albamon-pareto-tooltip" role="tooltip" hidden></div>
+          </div>
           <p class="map-caption" id="visualization-caption">Markers use Albamon’s actual worksite coordinates. Commute eligibility uses verified public transport—not straight-line distance.</p>
         </section>
       </section>
@@ -280,6 +339,21 @@
           </div>
           <nav class="report-links" id="hotel-report-links" aria-label="Download hotel reports"></nav>
         </header>
+
+        <section class="hotel-date-search" aria-labelledby="hotel-date-heading">
+          <div>
+            <p class="eyebrow">EXPLORE ANY DATES</p>
+            <h2 id="hotel-date-heading">Search every published shift in a date range</h2>
+            <p>The dashboard search is private exploration only. Discord remains fixed to <strong>Aug 29, Aug 30, Sep 5, and Sep 6</strong>.</p>
+          </div>
+          <form id="hotel-date-form">
+            <label class="field"><span>Start date</span><input id="hotel-start-date" type="date" required></label>
+            <label class="field"><span>End date</span><input id="hotel-end-date" type="date" required></label>
+            <button class="primary-button" id="hotel-date-submit" type="submit">Search dates</button>
+            <button class="secondary-button" id="hotel-date-reset" type="button">Show monitored report</button>
+          </form>
+          <p class="hotel-date-status" id="hotel-date-status" aria-live="polite">Showing the monitored report.</p>
+        </section>
 
         <section class="hotel-summary" aria-label="Hotel report summary">
           <article><strong id="hotel-summary-total">—</strong><span>Hotels compared</span></article>
@@ -313,12 +387,36 @@
 
           <div class="hotel-frontier-layout">
             <figure class="hotel-chart-card">
-              <figcaption>
-                <strong>Pay versus commute</strong>
-                <span>Gold points form the selected Pareto frontier; muted points are dominated.</span>
+              <figcaption class="hotel-visual-heading">
+                <div>
+                  <strong id="hotel-visual-title">Pay versus commute</strong>
+                  <span id="hotel-visual-description">Hover for a summary; click any point to inspect every shift and provider.</span>
+                </div>
+                <div class="visualization-controls">
+                  <div class="segmented-control visualization-toggle" role="group" aria-label="Hotel visualization">
+                    <button id="hotel-map-visual" type="button" aria-pressed="false">Map</button>
+                    <button class="is-active" id="hotel-pareto-visual" type="button" aria-pressed="true">Pareto</button>
+                  </div>
+                  <div class="chart-legend" id="hotel-chart-legend" aria-label="Hotel chart legend">
+                    <span><i class="dot dot--ready"></i>Comparable</span>
+                    <span><i class="dot dot--frontier"></i>Frontier</span>
+                  </div>
+                  <div class="map-legend" id="hotel-map-legend" aria-label="Hotel map legend" hidden>
+                    <span><i class="dot dot--ready"></i>Hotel</span>
+                    <span><i class="dot dot--frontier"></i>Frontier</span>
+                    <span><i class="dot dot--selected"></i>Selected</span>
+                  </div>
+                </div>
               </figcaption>
-              <div class="hotel-chart" id="hotel-chart" role="img" aria-label="Scatter plot of hotel pay and verified commute">
+              <div class="hotel-chart" id="hotel-chart" role="group" aria-label="Interactive scatter plot of hotel pay and verified commute">
                 <span class="map-loader" aria-hidden="true"></span>
+                <div class="pareto-tooltip" id="hotel-pareto-tooltip" role="tooltip" hidden></div>
+              </div>
+              <div class="hotel-map" id="hotel-map" role="application" aria-label="Map of hotel agency worksites" hidden></div>
+              <div class="hotel-map-fallback" id="hotel-map-fallback" hidden>
+                <span class="map-loader" aria-hidden="true"></span>
+                <strong>Loading hotel map…</strong>
+                <span>Hotel results and exact shifts remain available in the table.</span>
               </div>
             </figure>
 
@@ -352,6 +450,27 @@
           </div>
           <p class="hotel-footnote">* 주휴 적용 시급 is conditional on satisfying the agency’s statutory/advertised eligibility. Where no 주휴 rate is published, the “With 주휴” comparison conservatively retains actual pay and labels it as an actual-pay fallback.</p>
         </section>
+
+        <section class="agency-catalog-panel" aria-labelledby="agency-catalog-heading">
+          <div class="agency-catalog-heading">
+            <div>
+              <p class="eyebrow">AGENCY COVERAGE GUIDE</p>
+              <h2 id="agency-catalog-heading">Known hotel staffing networks</h2>
+            </div>
+          </div>
+          <p class="agency-catalog-note">Coverage badges distinguish successful public feeds, configured feeds awaiting dated listings, deliberately disabled low-yield sources, and agencies whose exact schedules remain login-gated.</p>
+          <div class="agency-catalog-scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th scope="col">Agency</th>
+                  <th scope="col">Known hotels / specialties</th>
+                </tr>
+              </thead>
+              <tbody id="agency-catalog-rows"></tbody>
+            </table>
+          </div>
+        </section>
       </section>
     </main>
 
@@ -369,6 +488,20 @@
       </div>
       <div class="drawer-body" id="drawer-body"></div>
     </aside>
+
+    <dialog class="origin-confirm-dialog" id="origin-confirm-dialog">
+      <form method="dialog">
+        <p class="eyebrow">CONFIRM COMMUTE ORIGIN</p>
+        <h2>Use this as the new starting point?</h2>
+        <p id="origin-confirm-address"></p>
+        <p class="origin-confirm-coordinates" id="origin-confirm-coordinates"></p>
+        <div class="warning-box">This invalidates origin-dependent route caches and recalculates Albamon and hotel commute times. The fixed Discord monitoring dates will not change.</div>
+        <div class="origin-confirm-actions">
+          <button class="secondary-button" value="cancel">Cancel</button>
+          <button class="primary-button" id="origin-confirm-button" value="confirm">Confirm and recalculate</button>
+        </div>
+      </form>
+    </dialog>
 
     <section class="compare-tray" id="compare-tray" aria-label="Jobs selected for comparison" hidden>
       <div class="compare-tray-copy">

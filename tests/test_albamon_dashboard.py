@@ -2,18 +2,21 @@ import gzip
 import json
 import tempfile
 import unittest
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from unittest.mock import patch
 
 from tools import albamon_dashboard
 from tools.albamon_dashboard import (
+    _requirement_review_fingerprint,
     _host_is_local,
     build_dashboard_payload,
     build_dashboard_snapshot,
     build_weekend_agency_payload,
     encode_response_body,
+    search_weekend_agencies,
     write_disposition,
+    write_review_resolution,
 )
 from tools.albamon_discord import notification_identity
 
@@ -52,6 +55,71 @@ def unified_job(recruit_no: int, **overrides) -> dict:
 
 
 class AlbamonDashboardTests(unittest.TestCase):
+    def test_hotel_exploration_validates_a_bounded_future_range(self):
+        today = date(2026, 8, 17)
+
+        self.assertEqual(
+            (date(2026, 8, 17), date(2026, 8, 18), date(2026, 8, 19)),
+            albamon_dashboard._search_dates_from_payload(
+                {"start_date": "2026-08-17", "end_date": "2026-08-19"},
+                today=today,
+            ),
+        )
+        with self.assertRaisesRegex(ValueError, "earlier than today"):
+            albamon_dashboard._search_dates_from_payload(
+                {"start_date": "2026-08-16", "end_date": "2026-08-19"},
+                today=today,
+            )
+        with self.assertRaisesRegex(ValueError, "at most 31 days"):
+            albamon_dashboard._search_dates_from_payload(
+                {"start_date": "2026-08-17", "end_date": "2026-09-17"},
+                today=today,
+            )
+
+    def test_hotel_exploration_is_all_weekdays_and_never_notification_scope(self):
+        report = {
+            "generated_at": "2026-08-17T12:00:00+09:00",
+            "policy": {
+                "search_dates": ["2026-08-17", "2026-08-18"],
+                "weekends_only": False,
+                "notification_scope": False,
+            },
+            "jobs": [],
+        }
+        with (
+            patch.object(albamon_dashboard, "read_api_key", return_value=""),
+            patch.object(
+                albamon_dashboard,
+                "run_pipeline",
+                return_value=(report, {}),
+            ) as pipeline,
+            patch.object(
+                albamon_dashboard,
+                "build_weekend_agency_payload",
+                return_value={"exploration": True},
+            ) as payload_builder,
+        ):
+            result = search_weekend_agencies(
+                {
+                    "start_date": "2026-08-17",
+                    "end_date": "2026-08-18",
+                    "force": True,
+                },
+                now=datetime.fromisoformat("2026-08-17T12:00:00+09:00"),
+            )
+
+        self.assertEqual({"exploration": True}, result)
+        self.assertEqual(
+            (date(2026, 8, 17), date(2026, 8, 18)),
+            pipeline.call_args.kwargs["search_dates"],
+        )
+        self.assertFalse(pipeline.call_args.kwargs["weekends_only"])
+        payload_builder.assert_called_once_with(
+            report,
+            now=datetime.fromisoformat("2026-08-17T12:00:00+09:00"),
+            exploration=True,
+        )
+
     def test_changed_route_origin_hides_stale_minutes_and_actionability(self):
         payload, details = build_dashboard_snapshot(
             {"jobs": [combined_job(100)], "logistics_jobs": []},
@@ -228,6 +296,10 @@ class AlbamonDashboardTests(unittest.TestCase):
                     {
                         "agency": "withyou",
                         "source_url": "https://with-you.kr/day.php",
+                        "latitude": 37.51,
+                        "longitude": 127.10,
+                        "location_basis": "test coordinates",
+                        "transit_minutes": commute,
                         "pay": {
                             "actual_hourly_won": actual,
                             "weekly_allowance_hourly_won": weekly,
@@ -259,6 +331,141 @@ class AlbamonDashboardTests(unittest.TestCase):
         self.assertEqual(16_800, by_name["Weekly"]["pareto_weekly_allowance_pay"])
         self.assertEqual(13_200, by_name["Near"]["pareto_weekly_allowance_pay"])
         self.assertFalse(by_name["Near"]["weekly_allowance_rate_stated"])
+        self.assertEqual(37.51, by_name["Near"]["latitude"])
+        self.assertEqual(127.10, by_name["Near"]["longitude"])
+        self.assertEqual("잠실동 189-4", payload["origin"]["name"])
+
+    def test_weekend_agency_payload_hides_expired_date_rows(self):
+        def row(work_date: str, employer: str) -> dict:
+            return {
+                "employer": employer,
+                "best_actual_hourly_won": 13_000,
+                "best_weekly_allowance_hourly_won": None,
+                "transit_minutes": 20,
+                "work_date": work_date,
+                "shift": "10:00~19:00",
+                "highest_paying_agencies": ["withyou"],
+                "role_category": "guest_service",
+                "cross_agency_duplicate": False,
+                "offers": [{
+                    "agency": "withyou",
+                    "source_url": "https://with-you.kr/day.php",
+                    "latitude": 37.51,
+                    "longitude": 127.10,
+                    "transit_minutes": 20,
+                    "pay": {"actual_hourly_won": 13_000},
+                }],
+            }
+
+        payload = build_weekend_agency_payload(
+            {"jobs": [row("2026-08-16", "Old"), row("2026-08-17", "Today")]},
+            now=datetime.fromisoformat("2026-08-17T12:00:00+09:00"),
+        )
+
+        self.assertEqual(["Today"], [hotel["employer"] for hotel in payload["hotels"]])
+        self.assertEqual(1, payload["summary"]["expired_job_count_hidden"])
+
+    def test_needs_review_explains_requirements_and_deferred_jobs_only(self):
+        combined = [combined_job(recruit_no) for recruit_no in range(100, 104)]
+        unified = [
+            unified_job(
+                100,
+                send_readiness="conditional_on_requirement",
+                fit_warning="센터 주소 확인 필요",
+                hard_requirements=["실제 센터 주소"],
+            ),
+            unified_job(
+                101,
+                application_disposition="maybe_later",
+                disposition_reason="일정 재확인",
+            ),
+            unified_job(102, application_disposition="do_not_apply"),
+            unified_job(103),
+        ]
+
+        payload = build_dashboard_payload(
+            {"jobs": combined, "logistics_jobs": []},
+            {"jobs": unified},
+        )
+
+        by_id = {job["recruit_no"]: job for job in payload["jobs"]}
+        self.assertEqual(2, payload["summary"]["needs_review_count"])
+        self.assertEqual(
+            {"verify_requirements": 1, "deferred": 1},
+            payload["summary"]["needs_review_breakdown"],
+        )
+        self.assertEqual("verify_requirements", by_id[100]["needs_review_reason"])
+        self.assertEqual("deferred", by_id[101]["needs_review_reason"])
+        self.assertEqual("", by_id[102]["needs_review_reason"])
+        self.assertEqual("실제 센터 주소", by_id[100]["review_reason_summary"])
+        self.assertEqual("일정 재확인", by_id[101]["review_reason_summary"])
+
+    def test_matching_requirement_acknowledgement_resolves_review_until_evidence_changes(self):
+        combined = [combined_job(100)]
+        job = unified_job(
+            100,
+            send_readiness="conditional_on_requirement",
+            fit_warning="보건증 확인 필요",
+            hard_requirements=["보건증"],
+        )
+        review_state = {
+            "version": 1,
+            "jobs": {
+                "100": {
+                    "status": "requirements_verified",
+                    "requirements_fingerprint": _requirement_review_fingerprint(job),
+                    "resolved_at": "2026-08-17T12:00:00+09:00",
+                    "note": "보유 확인",
+                }
+            },
+        }
+
+        resolved = build_dashboard_payload(
+            {"jobs": combined, "logistics_jobs": []},
+            {"jobs": [job]},
+            review_state=review_state,
+        )
+        self.assertEqual(0, resolved["summary"]["needs_review_count"])
+        self.assertEqual(1, resolved["summary"]["actionable_clear_count"])
+        self.assertEqual(
+            "requirements_verified", resolved["jobs"][0]["review_resolution_status"]
+        )
+
+        changed_job = {**job, "hard_requirements": ["보건증", "운전면허"]}
+        reopened = build_dashboard_payload(
+            {"jobs": combined, "logistics_jobs": []},
+            {"jobs": [changed_job]},
+            review_state=review_state,
+        )
+        self.assertEqual("verify_requirements", reopened["jobs"][0]["needs_review_reason"])
+        self.assertEqual("", reopened["jobs"][0]["review_resolution_status"])
+
+    def test_review_resolution_can_be_confirmed_and_reopened(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "reviews.json"
+            observed_at = datetime.fromisoformat("2026-08-17T13:00:00+09:00")
+            write_review_resolution(
+                path,
+                100,
+                "confirm_requirements",
+                "fingerprint-1",
+                "보유 확인",
+                now=observed_at,
+            )
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                "requirements_verified", payload["jobs"]["100"]["status"]
+            )
+            self.assertEqual("보유 확인", payload["jobs"]["100"]["note"])
+
+            write_review_resolution(
+                path,
+                100,
+                "reopen_requirements",
+                "fingerprint-1",
+            )
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            self.assertNotIn("100", payload["jobs"])
 
     def test_songpa_late_night_lane_is_available_to_dashboard_filters(self):
         combined = combined_job(
@@ -468,6 +675,46 @@ class AlbamonDashboardTests(unittest.TestCase):
                     "maybe_later",
                     "",
                     allowed_recruit_nos={101},
+                )
+
+    def test_review_resolution_prunes_jobs_missing_from_current_report(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "review_resolutions.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "jobs": {
+                            "99": {
+                                "status": "requirements_verified",
+                                "requirements_fingerprint": "stale",
+                            }
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            write_review_resolution(
+                path,
+                100,
+                "confirm_requirements",
+                "current",
+                allowed_recruit_nos={100},
+                now=datetime.fromisoformat("2026-08-09T10:00:00+09:00"),
+            )
+
+            saved = json.loads(path.read_text(encoding="utf-8"))
+            self.assertNotIn("99", saved["jobs"])
+            self.assertEqual("current", saved["jobs"]["100"]["requirements_fingerprint"])
+
+            with self.assertRaisesRegex(ValueError, "Unknown job"):
+                write_review_resolution(
+                    path,
+                    101,
+                    "confirm_requirements",
+                    "unknown",
+                    allowed_recruit_nos={100},
                 )
 
     def test_dashboard_accepts_only_loopback_host_headers(self):

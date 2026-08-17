@@ -23,6 +23,7 @@ try:
         KakaoQuotaBudget,
         KakaoQuotaExhausted,
         KakaoRequestPacer,
+        ORIGIN,
         env_file_value,
         fastest_route,
         kakao_error_code,
@@ -36,6 +37,7 @@ except ModuleNotFoundError:  # Direct CLI execution via tools/.
         KakaoQuotaBudget,
         KakaoQuotaExhausted,
         KakaoRequestPacer,
+        ORIGIN,
         env_file_value,
         fastest_route,
         kakao_error_code,
@@ -120,6 +122,24 @@ def _save_cache(path: Path, payload: dict[str, Any]) -> None:
         path,
         json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n",
     )
+
+
+def _origin_matches(cache: dict[str, Any]) -> bool:
+    cached = cache.get("origin")
+    if not isinstance(cached, dict):
+        return False
+    try:
+        return (
+            str(cached.get("name") or "").strip() == str(ORIGIN["name"])
+            and math.isclose(
+                float(cached.get("latitude")), float(ORIGIN["latitude"]), abs_tol=1e-7
+            )
+            and math.isclose(
+                float(cached.get("longitude")), float(ORIGIN["longitude"]), abs_tol=1e-7
+            )
+        )
+    except (TypeError, ValueError):
+        return False
 
 
 def _query_for_offer(offer: JobOffer) -> str:
@@ -356,7 +376,7 @@ def _enrich_offers(
                 transit_minutes=minutes,
                 transit_status=str((route or {}).get("status") or "unverified"),
                 transit_basis=(
-                    "Kakao public-transit route from 서울특별시 송파구 잠실동 189-4; "
+                    f"Kakao public-transit route from {ORIGIN['address']}; "
                     "generic schedule, not a future-time guarantee"
                     if route
                     else ""
@@ -380,6 +400,10 @@ def attach_routes(
     now = now or datetime.now(KOREA_TIMEZONE)
     location_cache = _load_cache(location_cache_path)
     route_cache = _load_cache(route_cache_path)
+    if not _origin_matches(route_cache):
+        route_cache = {"version": 1, "origin": dict(ORIGIN), "entries": {}}
+    else:
+        route_cache["origin"] = dict(ORIGIN)
     quota = KakaoQuotaBudget(quota_path)
     pacer = KakaoRequestPacer()
     before = int(quota.snapshot().get("used") or 0)
@@ -416,6 +440,7 @@ def attach_routes(
         "stale_route_reuse_count": stale_reused,
         "kakao_calls_this_run": max(0, int(quota_snapshot.get("used") or 0) - before),
         "kakao_quota": quota_snapshot,
+        "origin": dict(ORIGIN),
     }
 
 

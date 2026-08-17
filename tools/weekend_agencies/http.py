@@ -11,8 +11,21 @@ import urllib.request
 from typing import Callable
 
 
-ALLOWED_HOSTS = {"with-you.kr", "www.huplux.com", "www.eumplus.co.kr"}
-HOST_INTERVAL_SECONDS = {"www.huplux.com": 5.0}
+ALLOWED_HOSTS = {
+    "htservice.kr",
+    "with-you.kr",
+    "www.eumplus.co.kr",
+    "www.huplux.com",
+    "www.oulim.kr",
+    "www.xn--2s2bi09b.com",
+}
+HOST_INTERVAL_SECONDS = {
+    "htservice.kr": 1.0,
+    "www.huplux.com": 5.0,
+    "www.oulim.kr": 1.0,
+    "www.xn--2s2bi09b.com": 1.0,
+}
+DEFAULT_USER_AGENT = "AutoAlbamon-WeekendAgencyReport/1.0"
 
 
 class SourceFetchError(RuntimeError):
@@ -41,7 +54,7 @@ class HttpClient:
         if parsed.scheme not in {"http", "https"} or parsed.hostname not in ALLOWED_HOSTS:
             raise ValueError(f"source URL is outside the fixed allowlist: {url}")
 
-    def get(self, url: str) -> str:
+    def get(self, url: str, *, encoding: str | None = None) -> str:
         self._validate_url(url)
         host = urllib.parse.urlparse(url).hostname or ""
         interval = HOST_INTERVAL_SECONDS.get(host, self.minimum_interval_seconds)
@@ -53,10 +66,12 @@ class HttpClient:
         self._last_request_at_by_host[host] = self._monotonic()
         curl_path = shutil.which("curl")
         if curl_path:
-            return self._curl_get(curl_path, url)
-        return self._urllib_get(url)
+            return self._curl_get(curl_path, url, encoding=encoding)
+        return self._urllib_get(url, encoding=encoding)
 
-    def _curl_get(self, curl_path: str, url: str) -> str:
+    def _curl_get(
+        self, curl_path: str, url: str, *, encoding: str | None = None
+    ) -> str:
         """Use the OS trust store; WithYou serves a chain rejected by pyenv SSL."""
 
         host = urllib.parse.urlparse(url).hostname or ""
@@ -88,7 +103,7 @@ class HttpClient:
                     "--proto-redir",
                     "=http,https",
                     "--user-agent",
-                    "AutoAlbamon-WeekendAgencyReport/1.0",
+                    DEFAULT_USER_AGENT,
                     url,
                 ],
                 check=True,
@@ -101,13 +116,14 @@ class HttpClient:
             ) from exc
         if len(completed.stdout) > self.max_response_bytes:
             raise SourceFetchError("source response exceeded the size limit")
-        return completed.stdout.decode("utf-8", errors="replace")
+        return completed.stdout.decode(encoding or "utf-8", errors="replace")
 
-    def _urllib_get(self, url: str) -> str:
+    def _urllib_get(self, url: str, *, encoding: str | None = None) -> str:
+        host = urllib.parse.urlparse(url).hostname or ""
         request = urllib.request.Request(
             url,
             headers={
-                "User-Agent": "AutoAlbamon-WeekendAgencyReport/1.0",
+                "User-Agent": DEFAULT_USER_AGENT,
                 "Accept": "text/html,application/xhtml+xml",
             },
         )
@@ -120,7 +136,7 @@ class HttpClient:
                     payload = response.read(self.max_response_bytes + 1)
                     if len(payload) > self.max_response_bytes:
                         raise SourceFetchError("source response exceeded the size limit")
-                    charset = response.headers.get_content_charset() or "utf-8"
+                    charset = encoding or response.headers.get_content_charset() or "utf-8"
                     return payload.decode(charset, errors="replace")
             except (urllib.error.URLError, TimeoutError, OSError) as exc:
                 last_error = exc
