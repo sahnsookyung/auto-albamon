@@ -20,6 +20,7 @@ def clean_text(value: str) -> str:
 class TableCell:
     text: str
     links: tuple[str, ...] = ()
+    images: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -36,6 +37,7 @@ class _TableParser(HTMLParser):
         self._row_attributes: dict[str, str] = {}
         self._cell_parts: list[str] | None = None
         self._cell_links: list[str] = []
+        self._cell_images: list[str] = []
 
     def handle_starttag(
         self, tag: str, attrs: list[tuple[str, str | None]]
@@ -47,10 +49,15 @@ class _TableParser(HTMLParser):
         elif tag in {"td", "th"} and self._row_cells is not None:
             self._cell_parts = []
             self._cell_links = []
+            self._cell_images = []
         elif tag == "a" and self._cell_parts is not None:
             href = attributes.get("href", "").strip()
             if href:
                 self._cell_links.append(href)
+        elif tag == "img" and self._cell_parts is not None:
+            source = attributes.get("src", "").strip()
+            if source:
+                self._cell_images.append(source)
         elif tag in {"br", "p", "div", "li"} and self._cell_parts is not None:
             self._cell_parts.append(" ")
         elif tag == "input" and self._cell_parts is not None:
@@ -62,10 +69,15 @@ class _TableParser(HTMLParser):
         if tag in {"td", "th"} and self._cell_parts is not None:
             assert self._row_cells is not None
             self._row_cells.append(
-                TableCell(clean_text("".join(self._cell_parts)), tuple(self._cell_links))
+                TableCell(
+                    clean_text("".join(self._cell_parts)),
+                    tuple(self._cell_links),
+                    tuple(self._cell_images),
+                )
             )
             self._cell_parts = None
             self._cell_links = []
+            self._cell_images = []
         elif tag == "tr" and self._row_cells is not None:
             if self._row_cells:
                 self.rows.append(TableRow(tuple(self._row_cells), self._row_attributes))

@@ -608,6 +608,38 @@ class AlbamonApplicationMessageTests(unittest.TestCase):
         self.assertNotIn("음식점", item["pitch"])
         self.assertIn("상품 코드·수량", item["pitch"])
 
+    def test_non_coupang_logistics_job_does_not_inherit_pickup_warning(self):
+        job = {
+            "report_section": "logistics",
+            "logistics_category": "Other logistics/warehouse",
+            "is_coupang": False,
+            "utility_rank": 1,
+            "utility_tier": "B",
+            "utility_score": 84,
+            "recruit_no": 999999989,
+            "company": "매장 운영사",
+            "title": "주말 매장 상품 정리",
+            "url": "https://example.test/retail-stock",
+            "area": "서울 강남구",
+            "work_days": "주말(토, 일)",
+            "work_time": "09:00~13:30",
+            "work_time_option": "",
+            "salary_type": "시급",
+            "salary": "12,000원",
+            "application_methods": ["online"],
+            "hard_requirements": [],
+            "certificate_requirements": [],
+            "parts": ["매장관리·판매", "입출고·창고관리"],
+            "skills": ["상품 정리", "재고 관리"],
+        }
+
+        [record] = build_records({"jobs": [], "logistics_jobs": [job]})
+
+        self.assertEqual("relevance_grounded", record["message_origin"])
+        self.assertNotIn("송파구 표기", record["fit_warning"])
+        self.assertNotIn("실제 물류센터 주소", record["verify_before_sending"])
+        self.assertEqual("ready_after_schedule_check", record["send_readiness"])
+
     def test_explicit_kitchen_and_gym_titles_get_correct_role_family(self):
         self.assertEqual(
             "kitchen",

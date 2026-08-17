@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import time
 from dataclasses import replace
@@ -16,13 +17,16 @@ try:
 except ModuleNotFoundError:  # Direct CLI execution via tools/.
     from albamon_runtime import atomic_write_text
 
+from .agencies import (
+    hotel_agency_catalog_payload,
+    hotel_agency_source_coverage_payload,
+)
 from .config import (
     MIN_ACTUAL_HOURLY_WON,
     OUTPUT_PREFIX,
     SOURCE_CACHE_PATH,
     SEARCH_DATES,
     SEARCH_END,
-    SEARCH_START,
 )
 from .http import HttpClient
 from .models import JobOffer
@@ -30,7 +34,13 @@ from .models import PayBreakdown
 from .normalize import aggregate_offers, offer_is_actionable
 from .report import write_report
 from .routing import attach_routes
-from .sources import EumplusSource, HupluxSource, WithYouSource
+from .sources import (
+    EoullimSource,
+    EumplusSource,
+    HupluxSource,
+    RutineSource,
+    WithYouSource,
+)
 
 
 KOREA_TIMEZONE = ZoneInfo("Asia/Seoul")
@@ -44,7 +54,13 @@ SOURCE_SNAPSHOT_MAX_AGE_HOURS = 8
 
 
 def default_sources() -> tuple[object, ...]:
-    return (WithYouSource(), HupluxSource(), EumplusSource())
+    return (
+        WithYouSource(),
+        HupluxSource(),
+        EumplusSource(),
+        EoullimSource(),
+        RutineSource(),
+    )
 
 
 def _fingerprint(job: dict[str, Any]) -> str:
@@ -111,39 +127,60 @@ def _load_source_snapshots(path: Path) -> dict[str, Any]:
 
 
 def _snapshot_offers(
-    snapshots: dict[str, Any], source_name: str, *, now: datetime
-) -> tuple[list[JobOffer], str | None]:
+    snapshots: dict[str, Any],
+    source_name: str,
+    *,
+    search_dates: tuple[date, ...],
+    now: datetime,
+) -> tuple[list[JobOffer], str | None, bool]:
     entry = (snapshots.get("sources") or {}).get(source_name)
     if not isinstance(entry, dict) or not isinstance(entry.get("offers"), list):
-        return [], None
+        return [], None, False
+    expected_dates = [value.isoformat() for value in search_dates]
+    if entry.get("search_dates") != expected_dates:
+        return [], None, False
     try:
         checked_at = datetime.fromisoformat(str(entry.get("checked_at") or ""))
         if checked_at.tzinfo is None:
             checked_at = checked_at.replace(tzinfo=KOREA_TIMEZONE)
     except ValueError:
-        return [], None
+        return [], None, False
     if now - checked_at > timedelta(hours=SOURCE_SNAPSHOT_MAX_AGE_HOURS):
-        return [], None
+        return [], None, False
     try:
         return (
             [_offer_from_dict(item) for item in entry["offers"] if isinstance(item, dict)],
             checked_at.isoformat(timespec="seconds"),
+            True,
         )
     except (TypeError, ValueError):
-        return [], None
+        return [], None, False
 
 
 def _bootstrap_snapshot_from_previous(
-    prefix: Path, source_name: str, *, now: datetime
-) -> tuple[list[JobOffer], str | None]:
+    prefix: Path,
+    source_name: str,
+    *,
+    search_dates: tuple[date, ...],
+    weekends_only: bool,
+    now: datetime,
+) -> tuple[list[JobOffer], str | None, bool]:
     report_path = prefix.with_suffix(".json")
     if not report_path.exists():
-        return [], None
+        return [], None, False
     try:
         report = json.loads(report_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return [], None
+        return [], None, False
+    policy = report.get("policy") if isinstance(report.get("policy"), dict) else {}
+    report_dates = policy.get("search_dates") or policy.get("weekend_dates") or []
+    if report_dates != [value.isoformat() for value in search_dates]:
+        return [], None, False
+    if bool(policy.get("weekends_only", True)) != weekends_only:
+        return [], None, False
     source_state = (report.get("sources") or {}).get(source_name) or {}
+    if not isinstance(source_state, dict):
+        return [], None, False
     origin_text = str(
         source_state.get("snapshot_checked_at")
         or report.get("generated_at")
@@ -154,9 +191,9 @@ def _bootstrap_snapshot_from_previous(
         if origin.tzinfo is None:
             origin = origin.replace(tzinfo=KOREA_TIMEZONE)
     except ValueError:
-        return [], None
+        return [], None, False
     if now - origin > timedelta(hours=SOURCE_SNAPSHOT_MAX_AGE_HOURS):
-        return [], None
+        return [], None, False
     offers: list[JobOffer] = []
     for job in report.get("jobs") or []:
         if not isinstance(job, dict):
@@ -167,13 +204,24 @@ def _bootstrap_snapshot_from_previous(
                     offers.append(_offer_from_dict(payload))
                 except (TypeError, ValueError):
                     continue
-    return offers, origin.isoformat(timespec="seconds")
+    expected_count = source_state.get("fetched_offer_count")
+    snapshot_available = bool(offers) or expected_count == 0
+    return offers, origin.isoformat(timespec="seconds"), snapshot_available
 
 
 def validate_report(report: dict[str, Any]) -> None:
     jobs = report.get("jobs")
     if not isinstance(jobs, list):
         raise PipelineError("report jobs must be a list")
+    policy = report.get("policy") if isinstance(report.get("policy"), dict) else {}
+    allowed_dates = {
+        date.fromisoformat(str(value)) for value in policy.get("search_dates") or []
+    }
+    weekends_only = bool(policy.get("weekends_only", True))
+    minimum_pay = int(
+        policy.get("minimum_actual_hourly_won") or MIN_ACTUAL_HOURLY_WON
+    )
+    generated_date = datetime.fromisoformat(str(report["generated_at"])).date()
     group_ids: set[str] = set()
     for expected_rank, job in enumerate(jobs, start=1):
         if job.get("rank") != expected_rank:
@@ -183,9 +231,11 @@ def validate_report(report: dict[str, Any]) -> None:
             raise PipelineError("report contains a missing or duplicate group ID")
         group_ids.add(group_id)
         work_date = date.fromisoformat(str(job["work_date"]))
-        if work_date not in SEARCH_DATES or work_date.weekday() < 5:
-            raise PipelineError("report contains a job outside the weekend window")
-        if int(job["best_actual_hourly_won"]) < MIN_ACTUAL_HOURLY_WON:
+        if work_date not in allowed_dates or (weekends_only and work_date.weekday() < 5):
+            raise PipelineError("report contains a job outside the requested date window")
+        if work_date < generated_date:
+            raise PipelineError("report contains an expired work date")
+        if int(job["best_actual_hourly_won"]) < minimum_pay:
             raise PipelineError("report contains a below-threshold actual wage")
         offer_pays = [
             offer.get("pay", {}).get("actual_hourly_won")
@@ -217,6 +267,8 @@ def _collect_sources(
     client: HttpClient,
     output_prefix: Path,
     source_cache_path: Path,
+    search_dates: tuple[date, ...],
+    weekends_only: bool,
     now: datetime,
 ) -> tuple[list[JobOffer], dict[str, dict[str, Any]]]:
     source_rows: list[JobOffer] = []
@@ -228,16 +280,33 @@ def _collect_sources(
         source_name = str(getattr(source, "name", type(source).__name__))
         source_started = time.monotonic()
         try:
-            offers = list(source.fetch(client))
-        except Exception as exc:
-            offers, snapshot_checked_at = _snapshot_offers(
-                source_snapshots, source_name, now=now
+            fetch = getattr(source, "fetch")
+            parameters = inspect.signature(fetch).parameters
+            offers = list(
+                fetch(client, dates=search_dates)
+                if "dates" in parameters
+                else fetch(client)
             )
-            if not offers:
-                offers, snapshot_checked_at = _bootstrap_snapshot_from_previous(
-                    output_prefix, source_name, now=now
+        except Exception as exc:
+            offers, snapshot_checked_at, snapshot_available = _snapshot_offers(
+                source_snapshots,
+                source_name,
+                search_dates=search_dates,
+                now=now,
+            )
+            if not snapshot_available:
+                (
+                    offers,
+                    snapshot_checked_at,
+                    snapshot_available,
+                ) = _bootstrap_snapshot_from_previous(
+                    output_prefix,
+                    source_name,
+                    search_dates=search_dates,
+                    weekends_only=weekends_only,
+                    now=now,
                 )
-            if not offers:
+            if not snapshot_available:
                 failures[source_name] = type(exc).__name__
                 continue
             offers = [
@@ -255,30 +324,31 @@ def _collect_sources(
                 "snapshot_max_age_hours": SOURCE_SNAPSHOT_MAX_AGE_HOURS,
                 "snapshot_checked_at": snapshot_checked_at,
             }
-            source_snapshots.setdefault("sources", {})[source_name] = {
-                "checked_at": snapshot_checked_at,
-                "offers": [item.as_dict() for item in offers],
-            }
-            snapshots_changed = True
             source_rows.extend(offers)
             continue
         source_rows.extend(offers)
-        source_metrics[source_name] = {
+        metrics: dict[str, Any] = {
             "status": "live",
             "fetched_offer_count": len(offers),
             "elapsed_seconds": round(time.monotonic() - source_started, 3),
         }
+        adapter_metrics = getattr(source, "last_fetch_metrics", None)
+        if isinstance(adapter_metrics, dict):
+            metrics.update(
+                {
+                    str(key): value
+                    for key, value in adapter_metrics.items()
+                    if str(key) not in metrics
+                    and isinstance(value, (bool, int, float, str))
+                }
+            )
+        source_metrics[source_name] = metrics
         source_snapshots.setdefault("sources", {})[source_name] = {
             "checked_at": now.isoformat(timespec="seconds"),
+            "search_dates": [value.isoformat() for value in search_dates],
             "offers": [item.as_dict() for item in offers],
         }
         snapshots_changed = True
-
-    if failures:
-        names = ", ".join(sorted(failures))
-        raise PipelineError(
-            f"source refresh failed for {names}; previous complete report was preserved"
-        )
 
     if snapshots_changed:
         source_snapshots["updated_at"] = now.isoformat(timespec="seconds")
@@ -286,6 +356,11 @@ def _collect_sources(
             source_cache_path,
             json.dumps(source_snapshots, ensure_ascii=False, separators=(",", ":"))
             + "\n",
+        )
+    if failures:
+        names = ", ".join(sorted(failures))
+        raise PipelineError(
+            f"source refresh failed for {names}; previous complete report was preserved"
         )
     return source_rows, source_metrics
 
@@ -297,6 +372,9 @@ def _build_report(
     source_metrics: dict[str, dict[str, Any]],
     routing_metrics: dict[str, Any],
     output_prefix: Path,
+    search_dates: tuple[date, ...],
+    weekends_only: bool,
+    minimum_actual_hourly_won: int,
     now: datetime,
     elapsed_seconds: float,
 ) -> dict[str, Any]:
@@ -318,14 +396,21 @@ def _build_report(
         "generated_at": generated_at,
         "separate_from_albamon": True,
         "policy": {
-            "search_start": SEARCH_START.isoformat(),
-            "search_end": SEARCH_END.isoformat(),
-            "weekend_dates": [value.isoformat() for value in SEARCH_DATES],
-            "minimum_actual_hourly_won": MIN_ACTUAL_HOURLY_WON,
+            "search_start": min(search_dates).isoformat(),
+            "search_end": max(search_dates).isoformat(),
+            "search_dates": [value.isoformat() for value in search_dates],
+            "weekend_dates": [
+                value.isoformat() for value in search_dates if value.weekday() >= 5
+            ],
+            "weekends_only": weekends_only,
+            "minimum_actual_hourly_won": minimum_actual_hourly_won,
             "pay_filter_field": "actual_hourly_won",
             "weekly_allowance_used_for_filter_or_rank": False,
             "sort": ["actual_hourly_won_desc", "verified_transit_minutes_asc"],
-            "origin": "서울특별시 송파구 잠실동 189-4",
+            "origin": dict(routing_metrics.get("origin") or {}),
+            "notification_scope": (
+                search_dates == SEARCH_DATES and weekends_only
+            ),
         },
         "counts": {
             "fetched_offers": len(source_rows),
@@ -350,6 +435,8 @@ def _build_report(
         "routing": routing_metrics,
         "elapsed_seconds": round(elapsed_seconds, 3),
         "integrity_checks_passed": True,
+        "agency_catalog": hotel_agency_catalog_payload(),
+        "agency_source_coverage": hotel_agency_source_coverage_payload(),
         "jobs": jobs,
     }
     validate_report(report)
@@ -364,11 +451,17 @@ def run_pipeline(
     client: HttpClient | None = None,
     source_cache_path: Path = SOURCE_CACHE_PATH,
     route_enricher: Any = attach_routes,
+    search_dates: tuple[date, ...] = SEARCH_DATES,
+    weekends_only: bool = True,
+    minimum_actual_hourly_won: int = MIN_ACTUAL_HOURLY_WON,
     now: datetime | None = None,
     write_outputs: bool = True,
 ) -> tuple[dict[str, Any], dict[str, str]]:
     now = now or datetime.now(KOREA_TIMEZONE)
-    if now.date() > SEARCH_END:
+    if not search_dates:
+        raise PipelineError("search_dates must not be empty")
+    normalized_dates = tuple(sorted(set(search_dates)))
+    if normalized_dates == SEARCH_DATES and weekends_only and now.date() > SEARCH_END:
         raise PipelineError("search_window_ended")
     started = time.monotonic()
     source_rows, source_metrics = _collect_sources(
@@ -376,10 +469,22 @@ def run_pipeline(
         client=client or HttpClient(),
         output_prefix=output_prefix,
         source_cache_path=source_cache_path,
+        search_dates=normalized_dates,
+        weekends_only=weekends_only,
         now=now,
     )
 
-    actionable = [offer for offer in source_rows if offer_is_actionable(offer)]
+    actionable = [
+        offer
+        for offer in source_rows
+        if offer_is_actionable(
+            offer,
+            search_dates=normalized_dates,
+            weekends_only=weekends_only,
+            today=now.date(),
+            minimum_actual_hourly_won=minimum_actual_hourly_won,
+        )
+    ]
     routed, routing_metrics = route_enricher(actionable, api_key=api_key)
     jobs = aggregate_offers(routed)
     report = _build_report(
@@ -388,8 +493,78 @@ def run_pipeline(
         source_metrics=source_metrics,
         routing_metrics=routing_metrics,
         output_prefix=output_prefix,
+        search_dates=normalized_dates,
+        weekends_only=weekends_only,
+        minimum_actual_hourly_won=minimum_actual_hourly_won,
         now=now,
         elapsed_seconds=time.monotonic() - started,
     )
     paths = write_report(output_prefix, report) if write_outputs else {}
     return report, paths
+
+
+def reroute_report(
+    report: dict[str, Any],
+    *,
+    api_key: str,
+    output_prefix: Path,
+    now: datetime | None = None,
+    route_enricher: Any = attach_routes,
+    write_outputs: bool = True,
+) -> tuple[dict[str, Any], dict[str, str]]:
+    """Recalculate a complete saved report without refetching source websites."""
+
+    observed_at = now or datetime.now(KOREA_TIMEZONE)
+    policy = report.get("policy") if isinstance(report.get("policy"), dict) else {}
+    raw_dates = policy.get("search_dates") or policy.get("weekend_dates") or []
+    try:
+        search_dates = tuple(sorted({date.fromisoformat(str(value)) for value in raw_dates}))
+    except ValueError as exc:
+        raise PipelineError("saved report has invalid search dates") from exc
+    if not search_dates:
+        raise PipelineError("saved report has no search dates")
+    weekends_only = bool(policy.get("weekends_only", True))
+    minimum_pay = int(
+        policy.get("minimum_actual_hourly_won") or MIN_ACTUAL_HOURLY_WON
+    )
+    offers_by_id: dict[tuple[str, str], JobOffer] = {}
+    for job in report.get("jobs") or []:
+        if not isinstance(job, dict):
+            continue
+        for raw_offer in job.get("offers") or []:
+            if not isinstance(raw_offer, dict):
+                continue
+            offer = _offer_from_dict(raw_offer)
+            offers_by_id[(offer.agency, offer.source_id)] = offer
+    source_rows = list(offers_by_id.values())
+    actionable = [
+        offer
+        for offer in source_rows
+        if offer_is_actionable(
+            offer,
+            search_dates=search_dates,
+            weekends_only=weekends_only,
+            today=observed_at.date(),
+            minimum_actual_hourly_won=minimum_pay,
+        )
+    ]
+    routed, routing_metrics = route_enricher(actionable, api_key=api_key)
+    jobs = aggregate_offers(routed)
+    rebuilt = _build_report(
+        source_rows=source_rows,
+        jobs=jobs,
+        source_metrics={
+            str(name): dict(metrics)
+            for name, metrics in (report.get("sources") or {}).items()
+            if isinstance(metrics, dict)
+        },
+        routing_metrics=routing_metrics,
+        output_prefix=output_prefix,
+        search_dates=search_dates,
+        weekends_only=weekends_only,
+        minimum_actual_hourly_won=minimum_pay,
+        now=observed_at,
+        elapsed_seconds=0.0,
+    )
+    paths = write_report(output_prefix, rebuilt) if write_outputs else {}
+    return rebuilt, paths

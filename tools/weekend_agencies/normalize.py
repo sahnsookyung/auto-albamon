@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import re
 from dataclasses import replace
+from datetime import date
 from typing import Iterable
 
 from .config import MIN_ACTUAL_HOURLY_WON, SEARCH_DATES
@@ -29,6 +30,10 @@ EMPLOYER_ALIASES = {
     "서울드래곤시티": "서울 드래곤시티",
     "보코서울명동호텔": "보코 서울 명동",
     "조선팰리스서울강남": "조선 팰리스 서울강남",
+    "그랜드워커힐서울": "그랜드 워커힐 서울",
+    "워커힐호텔더뷔페": "그랜드 워커힐 서울",
+    "워커힐호텔연회장": "그랜드 워커힐 서울",
+    "워커힐호텔피자힐": "그랜드 워커힐 서울",
 }
 
 DEPARTMENT_TOKENS = (
@@ -46,6 +51,8 @@ DEPARTMENT_TOKENS = (
     "웨이루",
     "모모카페",
     "플라워",
+    "피자힐",
+    "더뷔페",
     "연회장",
     "연회",
 )
@@ -87,13 +94,21 @@ def extract_shifts(text: str) -> list[tuple[str, str]]:
     ]
 
 
-def offer_is_actionable(offer: JobOffer) -> bool:
+def offer_is_actionable(
+    offer: JobOffer,
+    *,
+    search_dates: tuple[date, ...] = SEARCH_DATES,
+    weekends_only: bool = True,
+    today: date | None = None,
+    minimum_actual_hourly_won: int = MIN_ACTUAL_HOURLY_WON,
+) -> bool:
     return (
-        offer.work_date in SEARCH_DATES
-        and offer.work_date.weekday() >= 5
+        offer.work_date in search_dates
+        and (not weekends_only or offer.work_date.weekday() >= 5)
+        and (today is None or offer.work_date >= today)
         and offer.status == "open"
         and isinstance(offer.pay.actual_hourly_won, int)
-        and offer.pay.actual_hourly_won >= MIN_ACTUAL_HOURLY_WON
+        and offer.pay.actual_hourly_won >= minimum_actual_hourly_won
         and bool(offer.shift_start and offer.shift_end)
     )
 

@@ -6,7 +6,7 @@ import re
 import urllib.parse
 from datetime import date
 
-from ..config import SEARCH_END, SEARCH_START
+from ..config import SEARCH_DATES
 from ..html_table import first_link, row_texts, table_rows
 from ..http import HttpClient
 from ..models import JobOffer
@@ -58,9 +58,12 @@ class WithYouSource:
         self,
         client: HttpClient,
         *,
-        start: date = SEARCH_START,
-        end: date = SEARCH_END,
+        dates: tuple[date, ...] = SEARCH_DATES,
     ) -> list[JobOffer]:
+        if not dates:
+            return []
+        start, end = min(dates), max(dates)
+        target_dates = set(dates)
         all_offers: list[JobOffer] = []
         seen_ids: set[str] = set()
         for page in range(1, 11):
@@ -73,7 +76,11 @@ class WithYouSource:
                     "page": page,
                 }
             )
-            page_offers = parse_page(client.get(f"{LIST_URL}?{query}"))
+            page_offers = [
+                offer
+                for offer in parse_page(client.get(f"{LIST_URL}?{query}"))
+                if offer.work_date in target_dates
+            ]
             fresh = [item for item in page_offers if item.source_id not in seen_ids]
             if not fresh:
                 break

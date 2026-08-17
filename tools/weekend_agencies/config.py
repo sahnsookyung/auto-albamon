@@ -5,6 +5,8 @@ from __future__ import annotations
 from datetime import date, timedelta
 from pathlib import Path
 
+from .agencies import HOTEL_AGENCIES
+
 SEARCH_START = date(2026, 8, 29)
 SEARCH_END = date(2026, 9, 6)
 MIN_ACTUAL_HOURLY_WON = 12_000
@@ -31,8 +33,4 @@ SHARED_KAKAO_QUOTA_PATH = Path(
     "artifacts/albamon/cache/kakao_public_transit_quota.json"
 )
 
-SOURCE_LABELS = {
-    "withyou": "위드유",
-    "huplux": "휴플럭스",
-    "eumplus": "이음플러스",
-}
+SOURCE_LABELS = {agency.agency_id: agency.name for agency in HOTEL_AGENCIES}

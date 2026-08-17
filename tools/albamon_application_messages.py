@@ -37,7 +37,7 @@ DEFAULT_DISPOSITIONS = Path("tools/albamon_application_dispositions.json")
 DEFAULT_TRANSIT_CACHE = Path("tools/albamon_transit_cache.json")
 DEFAULT_MESSAGE_CACHE = Path("artifacts/albamon/cache/application_messages.json")
 TRANSIT_CUTOFF_MINUTES = 50
-MESSAGE_RULESET_VERSION = 6
+MESSAGE_RULESET_VERSION = 7
 MESSAGE_CACHE_FIELDS = {
     "message",
     "message_origin",
@@ -1249,12 +1249,18 @@ def build_records(
         else:
             cache_misses += 1
             if job.get("report_section") == "logistics":
-                item = (
-                    bmart_spec(job)
-                    if "B-Mart" in str(job.get("logistics_category"))
-                    else coupang_spec(job)
-                )
-                message_origin = "logistics_template"
+                if "B-Mart" in str(job.get("logistics_category")):
+                    item = bmart_spec(job)
+                    message_origin = "logistics_template"
+                elif job.get("is_coupang") or "쿠팡" in " ".join(
+                    str(job.get(field) or "")
+                    for field in ("company", "title", "logistics_category")
+                ):
+                    item = coupang_spec(job)
+                    message_origin = "logistics_template"
+                else:
+                    item = fallback_regular_spec(job)
+                    message_origin = "relevance_grounded"
             else:
                 item = REGULAR_SPECS.get(recruit_no) or fallback_regular_spec(job)
                 message_origin = (

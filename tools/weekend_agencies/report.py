@@ -20,24 +20,68 @@ def _won(value: object) -> str:
     return f"₩{value:,}" if isinstance(value, int) else "미표기"
 
 
+def _catalog_features(entry: dict[str, Any]) -> str:
+    hotels = [str(item) for item in entry.get("featured_hotels") or [] if item]
+    specialties = [str(item) for item in entry.get("specialties") or [] if item]
+    parts = hotels
+    if specialties:
+        parts.append(f"특징: {', '.join(specialties)}")
+    return " · ".join(parts) or "세부 정보 미표기"
+
+
 def render_markdown(report: dict[str, Any]) -> str:
     policy = report["policy"]
     groups = report["jobs"]
+    catalog = [
+        entry
+        for entry in report.get("agency_catalog") or []
+        if isinstance(entry, dict)
+    ]
+    coverage = report.get("agency_source_coverage") or {}
     lines = [
         "# 주말 인력업체 일자리 보고서",
         "",
         f"생성: {report['generated_at']}",
-        f"대상: {policy['search_start']}–{policy['search_end']} 중 토·일만",
+        (
+            f"대상: {policy['search_start']}–{policy['search_end']} 중 토·일만"
+            if policy.get("weekends_only", True)
+            else f"대상: {policy['search_start']}–{policy['search_end']} 전체 날짜"
+        ),
         f"최저 기준: 실제/주휴 제외 환산 시급 {_won(policy['minimum_actual_hourly_won'])} 이상",
         "정렬: 실제/주휴 제외 시급 내림차순 → 검증 통근시간 오름차순",
         "",
         "> `실제 시급`은 주휴수당을 제외한 비교 기준입니다. `주휴 적용 시급`은 "
         "조건 충족 시에만 가능한 별도 참고값이며 최저시급 필터나 순위에 사용하지 않습니다.",
         "",
-        f"총 {len(groups)}개 근무 후보 · 교차업체 중복 {report['counts']['cross_agency_duplicates']}개 "
-        f"· 신규 {report['counts']['new']}개 · 변경 {report['counts']['changed']}개",
-        "",
     ]
+    if catalog:
+        lines.extend(
+            (
+                "## 업체 카탈로그",
+                "",
+                "| 업체 | 수집 상태 | 주요 호텔/특징 |",
+                "|---|---|---|",
+            )
+        )
+        for entry in catalog:
+            english_name = str(entry.get("english_name") or "").strip()
+            name = str(entry.get("name") or entry.get("agency_id") or "미표기")
+            label = f"{name} ({english_name})" if english_name else name
+            source_coverage = coverage.get(str(entry.get("agency_id") or ""), {})
+            status = str(source_coverage.get("status") or "reference")
+            reason = str(source_coverage.get("reason") or "")
+            coverage_text = f"{status}: {reason}" if reason else status
+            lines.append(
+                f"| {label} | {coverage_text} | {_catalog_features(entry)} |"
+            )
+        lines.append("")
+    lines.extend(
+        (
+            f"총 {len(groups)}개 근무 후보 · 교차업체 중복 {report['counts']['cross_agency_duplicates']}개 "
+            f"· 신규 {report['counts']['new']}개 · 변경 {report['counts']['changed']}개",
+            "",
+        )
+    )
     if not groups:
         lines.extend(("현재 조건을 충족하는 공개 모집이 없습니다.", ""))
     for job in groups:
@@ -100,9 +144,19 @@ def render_markdown(report: dict[str, Any]) -> str:
         )
     )
     for name, state in report["sources"].items():
+        listing_metrics = ""
+        if isinstance(state.get("raw_listing_rows"), int):
+            listing_metrics = (
+                f" · 원문 {state['raw_listing_rows']}행"
+                f" · 중복 {state.get('duplicate_listing_rows', 0)}행"
+                f" · 고유 {state.get('unique_listing_ids', 0)}건"
+                f" · 모집중 {state.get('unique_open_listing_ids', 0)}건"
+                f" · 대상일 {state.get('target_date_offer_count', 0)}건"
+            )
         lines.append(
             f"- {SOURCE_LABELS.get(name, name)}: {state.get('status', 'unknown')} · "
             f"{state.get('fetched_offer_count', 0)}개 · {state.get('elapsed_seconds', 0)}초"
+            f"{listing_metrics}"
         )
     lines.append("")
     return "\n".join(lines)

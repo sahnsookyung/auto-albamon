@@ -71,7 +71,15 @@ function matchesSchedule(model, schedule) {
 function matches(model, criteria, comparedIds, shortlistOnly) {
   const { job } = model;
   if (criteria.query && !model.searchText.includes(criteria.query)) return false;
-  if (criteria.status !== "all" && job.application_disposition !== criteria.status) return false;
+  let statusMatches;
+  if (criteria.status === "needs_review") {
+    statusMatches = Boolean(job.needs_review_reason);
+  } else if (criteria.status === "review_requirements") {
+    statusMatches = job.needs_review_reason === "verify_requirements";
+  } else {
+    statusMatches = criteria.status === "all" || job.application_disposition === criteria.status;
+  }
+  if (!statusMatches) return false;
   if (!matchesSchedule(model, criteria.schedule)) return false;
   if (
     criteria.commutePolicyOnly &&

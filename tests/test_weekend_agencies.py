@@ -25,7 +25,10 @@ from tools.weekend_agencies.notifications import (
 from tools.weekend_agencies.normalize import aggregate_offers, offer_is_actionable
 from tools.weekend_agencies.pay import (
     parse_eumplus_pay,
+    parse_htservice_pay,
     parse_huplux_pay,
+    parse_oulim_pay,
+    parse_rutine_pay,
     parse_withyou_pay,
 )
 from tools.weekend_agencies.pareto import (
@@ -33,10 +36,19 @@ from tools.weekend_agencies.pareto import (
     comparable_pay,
     pareto_hotel_ids,
 )
-from tools.weekend_agencies.pipeline import PipelineError, run_pipeline
+from tools.weekend_agencies.pipeline import PipelineError, default_sources, run_pipeline
 from tools.weekend_agencies.routing import _query_for_offer
 from tools.weekend_agencies.sources.eumplus import parse_page as parse_eumplus
+from tools.weekend_agencies.sources.htservice import (
+    offer_from_listing as htservice_offer_from_listing,
+)
+from tools.weekend_agencies.sources.htservice import parse_list_page as parse_htservice
 from tools.weekend_agencies.sources.huplux import parse_page as parse_huplux
+from tools.weekend_agencies.sources.oulim import (
+    EoullimSource,
+    parse_page as parse_eoullim,
+)
+from tools.weekend_agencies.sources.rutine import parse_page as parse_rutine
 from tools.weekend_agencies.sources.withyou import parse_page as parse_withyou
 
 
@@ -66,6 +78,42 @@ EUMPLUS_HTML = """
 <td>[고속터미널역-주휴발생시 16,800원]라운지서빙</td>
 <td>07:00~16:00</td><td>고속터미널역삼칠구</td><td>5명</td>
 <td><span>주</span> <strong>14,000원</strong></td><td><strong>모집중</strong></td>
+</tr></table>
+"""
+
+HTSERVICE_HTML = """
+<table><tr onclick="location.href='/daily_info.html?svc_name=dayjob&amp;ptype=view&amp;idx=5059'">
+<td>2026-08-29<span>토</span></td><td>워커힐호텔 피자힐</td>
+<td>피자힐 행사 세팅 및 서빙 운동화</td><td>13:00~22:00</td>
+<td>광나루역</td><td>남자</td><td>13000</td><td>모집중</td>
+</tr></table>
+"""
+
+HTSERVICE_DETAIL_HTML = """
+<table><tr><th>주휴시급&amp;기본시급</th><td>
+주휴시급 13,000원 받는분 기본시급 10,833원
+주휴시급 15,000원 받는분 기본시급 12,500원
+</td></tr></table>
+"""
+
+EOULLIM_HTML = """
+<table><tr>
+<td>08.29</td><td>토</td>
+<td><a href="/alba/work_total_view.asp?num=73181&amp;pageno=1">콘래드서울호텔.</a></td>
+<td>뷔페서빙/주휴수당별도</td><td>14:00~23:00 or 종료시</td>
+<td>7명</td><td>무관</td><td>\\13,000</td>
+<td><a><img src="/image/common/ing.gif"></a></td>
+</tr></table>
+<a href="/alba/work_total_list.asp?pageno=2">2</a>
+"""
+
+RUTINE_HTML = """
+<table><tr>
+<td>08/29</td><td>포시즌스 호텔</td><td>서빙 보조</td>
+<td>14:00 ~ 23:00</td><td>시급 14,400(주휴포함)</td><td>모집중</td>
+</tr><tr>
+<td>08/30</td><td>그랜드 인터컨티넨탈 파르나스 호텔</td><td>기물 보조</td>
+<td>12:00 ~ 22:00</td><td>일급 133,000</td><td>모집중</td>
 </tr></table>
 """
 
@@ -127,6 +175,41 @@ class PayParsingTests(unittest.TestCase):
         self.assertIsNone(conflict.weekly_allowance_hourly_won)
         self.assertTrue(conflict.warnings)
 
+    def test_htservice_requires_detail_verified_base_rate(self):
+        result = parse_htservice_pay("13,000", "주휴시급 13,000원 받는분 기본시급 10,833원")
+        self.assertEqual(10_833, result.actual_hourly_won)
+        self.assertEqual(13_000, result.weekly_allowance_hourly_won)
+        self.assertFalse(
+            offer_is_actionable(replace(offer("htservice", "1", 12_000), pay=result))
+        )
+
+        eligible = parse_htservice_pay(
+            "15,000", "주휴시급 15,000원 받는분 기본시급 12,500원"
+        )
+        self.assertEqual(12_500, eligible.actual_hourly_won)
+
+    def test_eoullim_separates_optional_weekly_allowance(self):
+        result = parse_oulim_pay(
+            "\\13,000", "뷔페서빙/주휴수당별도", "14:00", "23:00"
+        )
+        self.assertEqual(13_000, result.actual_hourly_won)
+        self.assertEqual(15_600, result.weekly_allowance_hourly_won)
+
+        inclusive = parse_oulim_pay(
+            "13,200", "주휴포함", "14:00", "23:00"
+        )
+        self.assertEqual(11_000, inclusive.actual_hourly_won)
+
+    def test_rutine_separates_inclusive_weekly_and_derives_daily_pay(self):
+        inclusive = parse_rutine_pay(
+            "시급 14,400(주휴포함)", "14:00", "23:00"
+        )
+        daily = parse_rutine_pay("일급 133,000", "12:00", "22:00")
+
+        self.assertEqual(12_000, inclusive.actual_hourly_won)
+        self.assertEqual(14_400, inclusive.weekly_allowance_hourly_won)
+        self.assertEqual(13_300, daily.actual_hourly_won)
+
 
 class SourceParserTests(unittest.TestCase):
     def test_withyou_list_parser_reads_status_shift_and_pay(self):
@@ -147,6 +230,69 @@ class SourceParserTests(unittest.TestCase):
         self.assertEqual(14_000, offers[0].pay.actual_hourly_won)
         self.assertEqual(16_800, offers[0].pay.weekly_allowance_hourly_won)
         self.assertTrue(offers[0].metadata["detail_requires_login"])
+
+    def test_htservice_parser_verifies_detail_pay_and_marks_http_transport(self):
+        listings = parse_htservice(HTSERVICE_HTML)
+        self.assertEqual(1, len(listings))
+        parsed = htservice_offer_from_listing(listings[0], HTSERVICE_DETAIL_HTML)
+        self.assertEqual(10_833, parsed.pay.actual_hourly_won)
+        self.assertEqual("unencrypted_http", parsed.metadata["transport_security"])
+
+    def test_eoullim_parser_reads_image_status_and_target_date_only(self):
+        offers = parse_eoullim(EOULLIM_HTML)
+        self.assertEqual(1, len(offers))
+        self.assertEqual("eoullim", offers[0].agency)
+        self.assertEqual("open", offers[0].status)
+        self.assertEqual(13_000, offers[0].pay.actual_hourly_won)
+        self.assertTrue(offers[0].metadata["end_time_may_extend"])
+        self.assertTrue(offers[0].pay.warnings)
+
+    def test_eoullim_fetch_deduplicates_page_boundary_rows(self):
+        page_two_new = EOULLIM_HTML.replace("08.29", "08.30").replace(
+            "num=73181", "num=73182"
+        )
+        page_two = EOULLIM_HTML + page_two_new
+
+        class Client:
+            def __init__(self):
+                self.calls = []
+
+            def get(self, url, *, encoding=None):
+                self.calls.append((url, encoding))
+                return EOULLIM_HTML if "pageno=1" in url else page_two
+
+        client = Client()
+        source = EoullimSource()
+        offers = source.fetch(
+            client, dates=(date(2026, 8, 29), date(2026, 8, 30))
+        )
+
+        self.assertEqual(["73181:0", "73182:0"], [item.source_id for item in offers])
+        self.assertTrue(all(encoding == "cp949" for _, encoding in client.calls))
+        self.assertEqual(
+            {
+                "pages_fetched": 2,
+                "raw_listing_rows": 3,
+                "duplicate_listing_rows": 1,
+                "unique_listing_ids": 2,
+                "unique_open_listing_ids": 2,
+                "target_date_offer_count": 2,
+            },
+            source.last_fetch_metrics,
+        )
+
+    def test_rutine_parser_keeps_every_target_date_shift(self):
+        offers = parse_rutine(RUTINE_HTML)
+
+        self.assertEqual(2, len(offers))
+        self.assertEqual({"rutine"}, {item.agency for item in offers})
+        self.assertEqual([12_000, 13_300], [item.pay.actual_hourly_won for item in offers])
+
+    def test_default_sources_include_only_anonymous_live_feeds(self):
+        self.assertEqual(
+            ["withyou", "huplux", "eumplus", "eoullim", "rutine"],
+            [source.name for source in default_sources()],
+        )
 
 
 class AggregationTests(unittest.TestCase):
@@ -258,7 +404,14 @@ class PipelineTests(unittest.TestCase):
         class Source:
             name = "fixture"
 
+            def __init__(self):
+                self.last_fetch_metrics = {}
+
             def fetch(self, _client):
+                self.last_fetch_metrics = {
+                    "raw_listing_rows": 3,
+                    "unique_listing_ids": 2,
+                }
                 return [
                     offer("withyou", "good", 12_000),
                     offer("withyou", "low", 11_999, employer="Low"),
@@ -292,12 +445,63 @@ class PipelineTests(unittest.TestCase):
                 now=datetime(2026, 8, 17, tzinfo=ZoneInfo("Asia/Seoul")),
             )
             self.assertEqual(1, report["counts"]["jobs"])
+            self.assertEqual(3, report["sources"]["fixture"]["raw_listing_rows"])
+            self.assertEqual(2, report["sources"]["fixture"]["unique_listing_ids"])
             self.assertTrue(report["separate_from_albamon"])
             self.assertFalse(report["policy"]["weekly_allowance_used_for_filter_or_rank"])
+            self.assertEqual(7, len(report["agency_catalog"]))
             self.assertTrue(Path(paths["json"]).exists())
             markdown = Path(paths["markdown"]).read_text(encoding="utf-8")
+            self.assertIn("## 업체 카탈로그", markdown)
+            self.assertIn("후플럭스 (HUPLUX)", markdown)
+            self.assertIn("힐튼/그래비티 판교", markdown)
             self.assertIn("실제 시급", markdown)
             self.assertIn("주휴 적용 시급", markdown)
+            self.assertIn("원문 3행", markdown)
+            self.assertIn("고유 2건", markdown)
+
+    def test_exploration_accepts_weekdays_and_flushes_dates_before_today(self):
+        class Source:
+            name = "fixture"
+
+            def fetch(self, _client, *, dates):
+                return [
+                    offer(
+                        "withyou",
+                        value.isoformat(),
+                        13_000,
+                        employer=f"Hotel {value.day}",
+                        work_date=value,
+                    )
+                    for value in dates
+                ]
+
+        def no_network(items, *, api_key):
+            return items, {
+                "unique_location_count": 0,
+                "unresolved_location_count": 0,
+                "unique_route_count": 0,
+                "stale_route_reuse_count": 0,
+                "kakao_calls_this_run": 0,
+                "kakao_quota": {},
+            }
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            report, _ = run_pipeline(
+                api_key="",
+                output_prefix=root / "latest",
+                source_cache_path=root / "source-cache.json",
+                sources=[Source()],
+                route_enricher=no_network,
+                search_dates=(date(2026, 8, 31), date(2026, 9, 1)),
+                weekends_only=False,
+                now=datetime(2026, 9, 1, tzinfo=ZoneInfo("Asia/Seoul")),
+            )
+
+        self.assertEqual(["2026-09-01"], [job["work_date"] for job in report["jobs"]])
+        self.assertFalse(report["policy"]["weekends_only"])
+        self.assertFalse(report["policy"]["notification_scope"])
 
     def test_pipeline_preserves_previous_report_when_any_source_fails(self):
         class BrokenSource:
@@ -370,6 +574,81 @@ class PipelineTests(unittest.TestCase):
                 run_pipeline(
                     **{**kwargs, "now": kwargs["now"] + timedelta(hours=9)}
                 )
+
+    def test_recent_empty_snapshot_is_a_valid_degraded_source_result(self):
+        class Source:
+            name = "empty"
+            broken = False
+
+            def fetch(self, _client):
+                if self.broken:
+                    raise TimeoutError("down")
+                return []
+
+        def no_network(items, *, api_key):
+            return items, {
+                "unique_location_count": 0,
+                "unresolved_location_count": 0,
+                "unique_route_count": 0,
+                "stale_route_reuse_count": 0,
+                "kakao_calls_this_run": 0,
+                "kakao_quota": {},
+            }
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = Source()
+            kwargs = {
+                "api_key": "",
+                "output_prefix": root / "latest",
+                "source_cache_path": root / "source-cache.json",
+                "sources": [source],
+                "route_enricher": no_network,
+                "now": datetime(2026, 8, 17, tzinfo=ZoneInfo("Asia/Seoul")),
+            }
+            first, _ = run_pipeline(**kwargs)
+            source.broken = True
+            second, _ = run_pipeline(
+                **{**kwargs, "now": kwargs["now"] + timedelta(hours=4)}
+            )
+
+            self.assertEqual(0, first["counts"]["jobs"])
+            self.assertEqual("stale_cache", second["sources"]["empty"]["status"])
+            self.assertEqual(0, second["sources"]["empty"]["fetched_offer_count"])
+
+    def test_successful_source_snapshots_persist_when_another_source_fails(self):
+        class GoodSource:
+            name = "good"
+
+            def fetch(self, _client):
+                return [offer("withyou", "captured", 12_000)]
+
+        class BrokenSource:
+            name = "broken"
+
+            def fetch(self, _client):
+                raise TimeoutError("down")
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            cache_path = root / "source-cache.json"
+            with self.assertRaisesRegex(PipelineError, "previous complete report was preserved"):
+                run_pipeline(
+                    api_key="",
+                    output_prefix=root / "latest",
+                    source_cache_path=cache_path,
+                    sources=[GoodSource(), BrokenSource()],
+                    now=datetime(2026, 8, 17, tzinfo=ZoneInfo("Asia/Seoul")),
+                )
+
+            cache = json.loads(cache_path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                ["captured"],
+                [
+                    item["source_id"]
+                    for item in cache["sources"]["good"]["offers"]
+                ],
+            )
 
     def test_pipeline_stops_after_search_end(self):
         with self.assertRaisesRegex(PipelineError, "search_window_ended"):
@@ -700,7 +979,7 @@ class HttpPacingTests(unittest.TestCase):
             monotonic=clock.monotonic,
             sleeper=clock.sleep,
         )
-        client._curl_get = lambda _path, _url: "ok"
+        client._curl_get = lambda _path, _url, encoding=None: "ok"
         url = "https://www.huplux.com/product/list.php?start_time=2026-08-29"
 
         with mock.patch("tools.weekend_agencies.http.shutil.which", return_value="curl"):

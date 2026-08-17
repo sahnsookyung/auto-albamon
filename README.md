@@ -25,11 +25,22 @@ fixture and is skipped when that fixture is not present.
 
 ## Separate weekend staffing-agency report
 
-WithYou, Huplux, and Eumplus are collected by an isolated adapter package; they
-do not enter Albamon's combined report, application dispositions, or Discord
-notification state. The temporary search covers only August 29–30 and
-September 5–6, 2026, and keeps only open shifts whose advertised base wage or
-reliable non-주휴 hourly equivalent is at least KRW 12,000:
+WithYou, Huplux, Eumplus, 어울림, and 루틴 are collected by an isolated adapter
+package; they do not enter Albamon's combined report, application
+dispositions, or Discord notification state. The temporary search covers only
+August 29–30 and September 5–6, 2026, and keeps only open shifts whose
+advertised base wage or reliable non-주휴 hourly equivalent is at least KRW
+12,000.
+
+The JSON and Markdown reports also carry a seven-agency reference catalog for
+데이에이전시, 후플럭스 (HUPLUX), 이음플러스, 위드유, 호텔서비스
+(HTService), 어울림, and 루틴. It records their principal hotels or specialties
+without a subjective star rating. Existing collector IDs
+(`huplux`, `eumplus`, `withyou`, `eoullim`, and `rutine`) resolve to those canonical
+entries. 데이에이전시 remains catalog-only because its exact dated shifts are
+behind an authenticated application flow; static hotel pages are not fabricated
+into live jobs. HTService is also catalog-only: its observed target jobs fell
+below the actual/base pay threshold and its public source uses unencrypted HTTP.
 
 ```bash
 python3 tools/weekend_agency_refresh.py \
@@ -46,12 +57,19 @@ source links and pay variants remain visible and the highest-paying agency is
 named.
 
 The source HTTP client uses fixed-host allowlisting, bounded responses,
-idempotent retry, and a five-second Huplux request cadence. A transient source
+idempotent retry, a five-second Huplux request cadence, and a one-second 어울림
+cadence. 어울림's legacy CP949 list is decoded explicitly and its image-based
+open/closed state is preserved; its login-gated detail page is never polled.
+루틴's anonymous public table is collected in one bounded request and keeps
+every exact shift while separating base and 주휴-inclusive pay.
+Raw rows, page-boundary duplicates, unique listing IDs, open IDs, and target-date
+offers are reported separately so an empty target window is observable. A transient source
 failure may reuse only a visibly marked snapshot from the prior eight hours;
-otherwise the previous complete report is preserved. Venue routes share
-Albamon's Kakao free-tier ledger and request pacer. The workflow exits without
-fetching after September 6, and its branch of the four-hour heartbeat is also
-disabled after that date.
+otherwise the previous complete report is preserved. Successful source
+snapshots are still checkpointed when another source fails, including valid
+empty results. Venue routes share Albamon's Kakao free-tier ledger and request
+pacer. The workflow exits without fetching after September 6, and its branch of
+the four-hour heartbeat is also disabled after that date.
 
 Hotel-agency Discord delivery is also isolated from Albamon. It reads only
 `DISCORD_WEBHOOK_URL_HOTELIER` from the selected workspace `.env` (or the same
@@ -118,6 +136,20 @@ output in a linked ranked table and worksite map, run:
 python3 tools/albamon_dashboard.py
 ```
 
+The Hotel agencies tab can run a separate, non-notifying exploration for any
+future date range up to 31 days. The selected range is saved in browser local
+storage, writes only to `artifacts/weekend-agencies/explore/`, and never changes
+the four fixed Discord monitoring dates. Rows whose work date is before the
+current local date are filtered from both report refreshes and dashboard
+projections.
+
+The dashboard shows the active commute origin above both data views. An address
+can be resolved with the shared Kakao free-tier ledger, or a coordinate can be
+selected directly from either map without an API call. A confirmed change is
+persisted to the ignored `tools/commute_origin.json`, invalidates route caches,
+and rebuilds Albamon plus available hotel reports. Kakao and Naver browser links
+are generated locally and do not consume an API quota.
+
 Then open <http://127.0.0.1:8765>. The server binds only to the local machine
 and has no additional Python dependencies. It reads the current combined,
 unified, transit, and Discord-state files each time the page reloads; it does
@@ -153,6 +185,18 @@ instead of allocating listeners per row. Pareto marking runs in O(n log n).
 `tools/albamon_application_dispositions.json` and immediately rebuild all three
 unified report formats. Applied status is intentionally read-only in the app;
 the authenticated Albamon application-history snapshot remains authoritative.
+
+The dashboard separates three decision queues. `New in 24h` is the rolling
+24-hour subset of actionable jobs based on first-seen notification state;
+`Actionable matches` passed the automated date, schedule, pay, commute,
+worksite, and exclusion rules; and `Manual review queue` contains either an
+unverified posting condition or a job deliberately marked `Maybe later`.
+Opening a manual-review row shows its exact evidence checklist. Marking a
+posting-condition check complete records only that evidence fingerprint in the
+local, ignored `tools/albamon_review_resolutions.json`; it does not apply or
+contact the employer, and changed posting evidence automatically reopens the
+review. Deferred jobs leave the queue when restored or skipped, while applied
+jobs leave when authenticated application history confirms them.
 
 ## Four-hour Discord notifications
 
