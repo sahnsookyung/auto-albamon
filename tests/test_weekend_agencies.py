@@ -880,6 +880,16 @@ class HotelierNotificationTests(unittest.TestCase):
         )
 
         self.assertEqual(1, len(hotels))
+        self.assertEqual(3, len(hotels[0]["job_options"]))
+        daytime = next(
+            option
+            for option in hotels[0]["job_options"]
+            if option["work_date"] == "2026-08-29" and option["shift"] == "10:00~19:00"
+        )
+        self.assertEqual(117_000, daytime["estimated_shift_earnings_won"])
+        self.assertEqual(["withyou"], [item["agency"] for item in daytime["provider_offers"]])
+        self.assertGreater(daytime["total_time_commitment_minutes"], 9 * 60)
+        self.assertLess(daytime["commute_adjusted_hourly_won"], 13_000)
         self.assertEqual(1, overview.count("JW메리어트 서울"))
         self.assertIn("`10:00~19:00`", details)
         self.assertIn("8/29,8/30", details)

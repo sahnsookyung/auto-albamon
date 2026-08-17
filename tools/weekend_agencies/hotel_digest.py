@@ -204,6 +204,118 @@ def _is_daytime_shift(value: Any) -> bool:
     return 6 * 60 <= start < end <= 20 * 60
 
 
+def _shift_minutes(value: Any) -> int | None:
+    match = re.fullmatch(r"(\d{2}):(\d{2})~(\d{2}):(\d{2})", str(value or ""))
+    if not match:
+        return None
+    start = int(match.group(1)) * 60 + int(match.group(2))
+    end = int(match.group(3)) * 60 + int(match.group(4))
+    if end <= start:
+        end += 24 * 60
+    duration = end - start
+    return duration if 0 < duration <= 18 * 60 else None
+
+
+def _late_return_risk(value: Any) -> bool:
+    match = re.fullmatch(r"(\d{2}):(\d{2})~(\d{2}):(\d{2})", str(value or ""))
+    if not match:
+        return False
+    start = int(match.group(1)) * 60 + int(match.group(2))
+    end = int(match.group(3)) * 60 + int(match.group(4))
+    return end <= start or end >= 23 * 60 or end <= 5 * 60
+
+
+def _job_options(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Keep decision metrics per dated role/shift instead of only per hotel."""
+
+    options: list[dict[str, Any]] = []
+    for row in rows:
+        shift = str(row.get("shift") or "")
+        duration_minutes = _shift_minutes(shift)
+        actual = row.get("best_actual_hourly_won")
+        weekly = row.get("best_weekly_allowance_hourly_won")
+        commute = row.get("transit_minutes")
+        total_minutes = (
+            duration_minutes + (2 * int(commute))
+            if duration_minutes is not None and isinstance(commute, int)
+            else None
+        )
+        estimated_earnings = (
+            round(int(actual) * duration_minutes / 60)
+            if isinstance(actual, int) and duration_minutes is not None
+            else None
+        )
+        commute_adjusted = (
+            round(estimated_earnings * 60 / total_minutes)
+            if isinstance(estimated_earnings, int)
+            and isinstance(total_minutes, int)
+            and total_minutes > 0
+            else None
+        )
+        offers = [
+            offer for offer in row.get("offers") or [] if isinstance(offer, dict)
+        ]
+        warnings = sorted(
+            {
+                str(warning)
+                for offer in offers
+                for warning in (offer.get("pay") or {}).get("warnings") or []
+                if str(warning).strip()
+            }
+        )
+        provider_offers: list[dict[str, Any]] = []
+        for offer in offers:
+            pay = offer.get("pay") if isinstance(offer.get("pay"), dict) else {}
+            provider_offers.append(
+                {
+                    "agency": str(offer.get("agency") or ""),
+                    "actual_hourly_won": pay.get("actual_hourly_won"),
+                    "weekly_allowance_hourly_won": pay.get(
+                        "weekly_allowance_hourly_won"
+                    ),
+                    "source_url": str(offer.get("source_url") or ""),
+                }
+            )
+        options.append(
+            {
+                "option_id": str(row.get("group_id") or ""),
+                "work_date": str(row.get("work_date") or ""),
+                "shift": shift,
+                "role_category": str(row.get("role_category") or "other"),
+                "title": str(row.get("title") or ""),
+                "actual_hourly_won": actual,
+                "weekly_allowance_hourly_won": weekly,
+                "best_agencies": list(row.get("highest_paying_agencies") or []),
+                "agencies": list(row.get("agencies") or []),
+                "provider_offers": provider_offers,
+                "duration_minutes": duration_minutes,
+                "estimated_shift_earnings_won": estimated_earnings,
+                "round_trip_commute_minutes": (
+                    2 * int(commute) if isinstance(commute, int) else None
+                ),
+                "total_time_commitment_minutes": total_minutes,
+                "commute_adjusted_hourly_won": commute_adjusted,
+                "daytime": _is_daytime_shift(shift),
+                "late_return_risk": _late_return_risk(shift),
+                "pay_confidence": "high" if not warnings else "review",
+                "pay_warnings": warnings,
+                "source_snapshot_stale": any(
+                    (offer.get("metadata") or {}).get("source_snapshot_stale")
+                    for offer in offers
+                ),
+            }
+        )
+    options.sort(
+        key=lambda item: (
+            str(item["work_date"]),
+            str(item["shift"]),
+            str(item["role_category"]),
+            -int(item.get("actual_hourly_won") or 0),
+        )
+    )
+    return options
+
+
 def aggregate_hotels(jobs: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
     grouped: dict[str, list[dict[str, Any]]] = {}
     for job in jobs:
@@ -256,6 +368,7 @@ def aggregate_hotels(jobs: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
             if item.get("actual_hourly_max") == max_actual
         )
         shift_options = _shift_options(rows)
+        job_options = _job_options(rows)
         daytime_values = [
             int(option["actual_hourly_max"])
             for option in shift_options
@@ -297,6 +410,29 @@ def aggregate_hotels(jobs: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
                     "",
                 ),
                 "shift_options": shift_options,
+                "job_options": job_options,
+                "best_commute_adjusted_hourly_won": max(
+                    (
+                        int(option["commute_adjusted_hourly_won"])
+                        for option in job_options
+                        if isinstance(option.get("commute_adjusted_hourly_won"), int)
+                    ),
+                    default=None,
+                ),
+                "best_estimated_shift_earnings_won": max(
+                    (
+                        int(option["estimated_shift_earnings_won"])
+                        for option in job_options
+                        if isinstance(option.get("estimated_shift_earnings_won"), int)
+                    ),
+                    default=None,
+                ),
+                "late_return_option_count": sum(
+                    bool(option.get("late_return_risk")) for option in job_options
+                ),
+                "pay_review_option_count": sum(
+                    option.get("pay_confidence") != "high" for option in job_options
+                ),
                 "source_snapshot_stale": any(
                     (offer.get("metadata") or {}).get("source_snapshot_stale")
                     for offer in offers

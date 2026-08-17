@@ -18,6 +18,17 @@ import {
   albamonPointForJob,
   albamonPointSummary,
 } from "/albamon-pareto.mjs";
+import {
+  filterHotels,
+  hotelDecisionSummary,
+  serializeHotelFilters,
+} from "/hotel-view-model.mjs";
+import { clusterProjectedPoints } from "/point-layout.mjs";
+import {
+  readStoredJson,
+  removeStoredValue,
+  writeStoredJson,
+} from "/safe-storage.mjs";
 
 const state = {
   payload: null,
@@ -42,6 +53,7 @@ const state = {
   toastTimer: null,
   activeDesk: "albamon",
   hotelPayload: null,
+  filteredHotels: [],
   hotelPayMode: "actual",
   hotelVisualization: "pareto",
   hotelLoadingPromise: null,
@@ -50,8 +62,13 @@ const state = {
   hotelOriginMarker: null,
   hotelMarkers: new Map(),
   hotelPointsById: new Map(),
+  hotelPointClusters: new Map(),
+  albamonPointClusters: new Map(),
   selectedHotelId: null,
   hotelSearchCustom: false,
+  hotelOperationId: null,
+  hotelOperationPoll: null,
+  hotelFilterTimer: null,
   originCandidate: null,
   originPickMode: false,
   originCandidateMarker: null,
@@ -60,6 +77,8 @@ const state = {
 
 const FILTER_STORAGE_KEY = "jobscout.dashboard.filters.v1";
 const HOTEL_SEARCH_STORAGE_KEY = "jobscout.hotel-date-search.v1";
+const HOTEL_FILTER_STORAGE_KEY = "jobscout.hotel-result-filters.v1";
+const HOTEL_SAVED_SEARCH_STORAGE_KEY = "jobscout.hotel-saved-searches.v1";
 const LEAFLET_VERSION = "1.9.4";
 const LEAFLET_BASE_URL = `https://unpkg.com/leaflet@${LEAFLET_VERSION}/dist`;
 const CAPITAL_REGION_BOUNDS = { minLat: 36.8, maxLat: 38.3, minLon: 125.8, maxLon: 128.3 };
@@ -134,14 +153,12 @@ const elements = {
   comparisonGrid: document.querySelector("#comparison-grid"),
   closeCompare: document.querySelector("#close-compare"),
   toast: document.querySelector("#toast"),
-  hotelReportLinks: document.querySelector("#hotel-report-links"),
   hotelSummaryTotal: document.querySelector("#hotel-summary-total"),
   hotelSummaryFrontier: document.querySelector("#hotel-summary-frontier"),
   hotelSummaryPay: document.querySelector("#hotel-summary-pay"),
   hotelSummaryWeekly: document.querySelector("#hotel-summary-weekly"),
   hotelPayActual: document.querySelector("#hotel-pay-actual"),
   hotelPayWeekly: document.querySelector("#hotel-pay-weekly"),
-  hotelShowAll: document.querySelector("#hotel-show-all"),
   hotelBasisNote: document.querySelector("#hotel-basis-note"),
   hotelSourceWarning: document.querySelector("#hotel-source-warning"),
   hotelMapVisual: document.querySelector("#hotel-map-visual"),
@@ -163,8 +180,30 @@ const elements = {
   hotelStartDate: document.querySelector("#hotel-start-date"),
   hotelEndDate: document.querySelector("#hotel-end-date"),
   hotelDateSubmit: document.querySelector("#hotel-date-submit"),
+  hotelDateRefresh: document.querySelector("#hotel-date-refresh"),
   hotelDateReset: document.querySelector("#hotel-date-reset"),
   hotelDateStatus: document.querySelector("#hotel-date-status"),
+  hotelOperationProgress: document.querySelector("#hotel-operation-progress"),
+  hotelOperationMessage: document.querySelector("#hotel-operation-message"),
+  hotelOperationDetail: document.querySelector("#hotel-operation-detail"),
+  hotelOperationMeter: document.querySelector("#hotel-operation-meter"),
+  hotelOperationCancel: document.querySelector("#hotel-operation-cancel"),
+  hotelSearchFilter: document.querySelector("#hotel-search-filter"),
+  hotelFilterStartDate: document.querySelector("#hotel-filter-start-date"),
+  hotelFilterEndDate: document.querySelector("#hotel-filter-end-date"),
+  hotelShiftStart: document.querySelector("#hotel-shift-start"),
+  hotelShiftEnd: document.querySelector("#hotel-shift-end"),
+  hotelCommuteFilter: document.querySelector("#hotel-commute-filter"),
+  hotelMinPayFilter: document.querySelector("#hotel-min-pay-filter"),
+  hotelRoleFilter: document.querySelector("#hotel-role-filter"),
+  hotelProviderFilter: document.querySelector("#hotel-provider-filter"),
+  hotelFilterFeedback: document.querySelector("#hotel-filter-feedback"),
+  hotelClearFilters: document.querySelector("#hotel-clear-filters"),
+  hotelSavedSearch: document.querySelector("#hotel-saved-search"),
+  hotelSaveSearch: document.querySelector("#hotel-save-search"),
+  hotelDeleteSearch: document.querySelector("#hotel-delete-search"),
+  hotelShareSearch: document.querySelector("#hotel-share-search"),
+  hotelSourceHealth: document.querySelector("#hotel-source-health"),
   originName: document.querySelector("#origin-name"),
   originAddress: document.querySelector("#origin-address"),
   originCoordinates: document.querySelector("#origin-coordinates"),
@@ -186,6 +225,10 @@ const elements = {
   originConfirmAddress: document.querySelector("#origin-confirm-address"),
   originConfirmCoordinates: document.querySelector("#origin-confirm-coordinates"),
   originConfirmButton: document.querySelector("#origin-confirm-button"),
+  pointChoiceDialog: document.querySelector("#point-choice-dialog"),
+  pointChoiceTitle: document.querySelector("#point-choice-title"),
+  pointChoiceList: document.querySelector("#point-choice-list"),
+  closePointChoice: document.querySelector("#close-point-choice"),
   queueFilterButtons: [...document.querySelectorAll("[data-queue-filter]")],
 };
 
@@ -368,31 +411,153 @@ function restoreHotelSearchPreferences() {
   const today = localIsoDate();
   elements.hotelStartDate.min = today;
   elements.hotelEndDate.min = today;
-  try {
-    const saved = JSON.parse(window.localStorage.getItem(HOTEL_SEARCH_STORAGE_KEY) || "null");
-    if (saved?.custom && saved.startDate >= today && saved.endDate >= saved.startDate) {
-      state.hotelSearchCustom = true;
-      elements.hotelStartDate.value = saved.startDate;
-      elements.hotelEndDate.value = saved.endDate;
-      return;
-    }
-  } catch {
-    window.localStorage.removeItem(HOTEL_SEARCH_STORAGE_KEY);
+  const saved = readStoredJson(HOTEL_SEARCH_STORAGE_KEY);
+  if (saved?.custom && saved.startDate >= today && saved.endDate >= saved.startDate) {
+    state.hotelSearchCustom = true;
+    elements.hotelStartDate.value = saved.startDate;
+    elements.hotelEndDate.value = saved.endDate;
+    return;
   }
+  if (saved) removeStoredValue(HOTEL_SEARCH_STORAGE_KEY);
   state.hotelSearchCustom = false;
   elements.hotelStartDate.value = today;
   elements.hotelEndDate.value = today;
 }
 
 function persistHotelSearchPreferences() {
+  writeStoredJson(HOTEL_SEARCH_STORAGE_KEY, {
+    custom: state.hotelSearchCustom,
+    startDate: elements.hotelStartDate.value,
+    endDate: elements.hotelEndDate.value,
+  });
+}
+
+function hotelFilterControls() {
+  return {
+    query: elements.hotelSearchFilter.value,
+    dateStart: elements.hotelFilterStartDate.value,
+    dateEnd: elements.hotelFilterEndDate.value,
+    shiftStart: elements.hotelShiftStart.value,
+    shiftEnd: elements.hotelShiftEnd.value,
+    maxCommute: elements.hotelCommuteFilter.value,
+    minimumPay: elements.hotelMinPayFilter.value,
+    role: elements.hotelRoleFilter.value,
+    provider: elements.hotelProviderFilter.value,
+    payMode: state.hotelPayMode,
+  };
+}
+
+function setHotelFilterControls(filters = {}) {
+  elements.hotelSearchFilter.value = filters.query || "";
+  elements.hotelFilterStartDate.value = filters.dateStart || "";
+  elements.hotelFilterEndDate.value = filters.dateEnd || "";
+  elements.hotelShiftStart.value = filters.shiftStart || "";
+  elements.hotelShiftEnd.value = filters.shiftEnd || "";
+  elements.hotelCommuteFilter.value = filters.maxCommute || "";
+  elements.hotelMinPayFilter.value = filters.minimumPay ?? "12000";
+  elements.hotelRoleFilter.value = filters.role || "all";
+  elements.hotelProviderFilter.value = filters.provider || "all";
+}
+
+function hotelFiltersFromUrl() {
+  const params = new URLSearchParams(window.location.search);
+  const result = {};
+  for (const key of [
+    "query", "dateStart", "dateEnd", "shiftStart", "shiftEnd",
+    "maxCommute", "minimumPay", "role", "provider", "payMode",
+  ]) {
+    const value = params.get(`hotel_${key}`);
+    if (value !== null) result[key] = value;
+  }
+  return result;
+}
+
+function restoreHotelFilters() {
+  const stored = readStoredJson(HOTEL_FILTER_STORAGE_KEY, {}) || {};
+  const fromUrl = hotelFiltersFromUrl();
+  const filters = { ...stored, ...fromUrl };
+  if (["actual", "weekly_allowance"].includes(filters.payMode)) {
+    state.hotelPayMode = filters.payMode;
+  }
+  setHotelFilterControls(filters);
+}
+
+function persistHotelFilters({ updateUrl = true } = {}) {
+  const filters = hotelFilterControls();
+  writeStoredJson(HOTEL_FILTER_STORAGE_KEY, filters);
+  if (!updateUrl) return;
+  const params = new URLSearchParams(window.location.search);
+  for (const key of [
+    "query", "dateStart", "dateEnd", "shiftStart", "shiftEnd",
+    "maxCommute", "minimumPay", "role", "provider", "payMode",
+  ]) params.delete(`hotel_${key}`);
+  for (const [key, value] of Object.entries(serializeHotelFilters(filters))) {
+    params.set(`hotel_${key}`, value);
+  }
+  const query = params.toString();
+  window.history.replaceState(null, "", `${window.location.pathname}${query ? `?${query}` : ""}${window.location.hash}`);
+}
+
+function savedHotelSearches() {
+  const saved = readStoredJson(HOTEL_SAVED_SEARCH_STORAGE_KEY, {});
+  return saved && typeof saved === "object" && !Array.isArray(saved) ? saved : {};
+}
+
+function renderSavedHotelSearches(selected = "") {
+  const fragment = document.createDocumentFragment();
+  const current = createElement("option", "", "Current filters");
+  current.value = "";
+  fragment.append(current);
+  for (const name of Object.keys(savedHotelSearches()).sort((a, b) => a.localeCompare(b, "ko"))) {
+    const option = createElement("option", "", name);
+    option.value = name;
+    fragment.append(option);
+  }
+  elements.hotelSavedSearch.replaceChildren(fragment);
+  elements.hotelSavedSearch.value = selected;
+  elements.hotelDeleteSearch.disabled = !selected;
+}
+
+function saveCurrentHotelSearch() {
+  const name = cleanText(window.prompt("Name this hotel filter view:"));
+  if (!name) return;
+  const saved = savedHotelSearches();
+  saved[name.slice(0, 60)] = hotelFilterControls();
+  if (!writeStoredJson(HOTEL_SAVED_SEARCH_STORAGE_KEY, saved)) {
+    showToast("This browser could not save the view.", true);
+    return;
+  }
+  renderSavedHotelSearches(name.slice(0, 60));
+  showToast(`Saved “${name.slice(0, 60)}”.`);
+}
+
+function applySavedHotelSearch(name) {
+  if (!name) return;
+  const filters = savedHotelSearches()[name];
+  if (!filters) return;
+  if (["actual", "weekly_allowance"].includes(filters.payMode)) state.hotelPayMode = filters.payMode;
+  setHotelFilterControls(filters);
+  persistHotelFilters();
+  renderHotelView();
+}
+
+function deleteSavedHotelSearch() {
+  const name = elements.hotelSavedSearch.value;
+  if (!name) return;
+  const saved = savedHotelSearches();
+  delete saved[name];
+  writeStoredJson(HOTEL_SAVED_SEARCH_STORAGE_KEY, saved);
+  renderSavedHotelSearches();
+  showToast(`Deleted “${name}”.`);
+}
+
+async function copyHotelSearchLink() {
+  persistHotelFilters();
   try {
-    window.localStorage.setItem(HOTEL_SEARCH_STORAGE_KEY, JSON.stringify({
-      custom: state.hotelSearchCustom,
-      startDate: elements.hotelStartDate.value,
-      endDate: elements.hotelEndDate.value,
-    }));
+    await navigator.clipboard.writeText(window.location.href);
+    showToast("Filter link copied.");
   } catch {
-    // Exploration remains usable in-session when local storage is unavailable.
+    showToast("Could not copy automatically; copy the browser URL instead.", true);
   }
 }
 
@@ -468,6 +633,15 @@ function renderHotelChart(hotels) {
   );
 
   const frontierPoints = points.filter((point) => point.frontier).sort((left, right) => left.commute - right.commute);
+  // The SVG viewBox is commonly scaled down inside the split dashboard pane.
+  // Use a conservative viewBox-space diameter so the 26px HTML hit targets do
+  // not overlap after that scaling and send a click to a neighboring cluster.
+  const clusters = clusterProjectedPoints(
+    points,
+    (point) => ({ x: x(point.commute), y: y(point.pay) }),
+    48,
+  );
+  state.hotelPointClusters = new Map();
   if (frontierPoints.length > 1) {
     svg.append(svgElement("polyline", {
       points: frontierPoints.map((point) => `${x(point.commute)},${y(point.pay)}`).join(" "),
@@ -487,29 +661,36 @@ function renderHotelChart(hotels) {
     group.append(
       svgElement("circle", { cx: x(point.commute), cy: y(point.pay), r: point.frontier ? 7 : 4.5, class: "chart-point-dot" }),
     );
-    if (point.frontier) {
+    const pointCluster = clusters.find((cluster) => cluster.points.includes(point));
+    if (point.frontier && pointCluster?.points[0] === point) {
       const label = cleanText(point.hotel.employer).replace(" 서울강남", "").replace(" 서울", "");
       group.append(svgElement("text", { x: x(point.commute) + 10, y: y(point.pay) - 10, class: "chart-point-label" }, label));
     }
-    const control = createElement(
-      "button",
-      `pareto-point-button${summary.hotelId === state.selectedHotelId ? " is-selected" : ""}`,
-    );
+    svg.append(group);
+  }
+  for (const [index, cluster] of clusters.entries()) {
+    const summaries = cluster.points.map(hotelPointSummary);
+    const selected = summaries.some((summary) => summary.hotelId === state.selectedHotelId);
+    const clusterId = `hotel-${index}`;
+    state.hotelPointClusters.set(clusterId, cluster.points);
+    const control = createElement("button", `pareto-point-button${selected ? " is-selected" : ""}`);
     control.type = "button";
-    control.dataset.hotelPointId = summary.hotelId;
-    control.setAttribute("aria-pressed", String(summary.hotelId === state.selectedHotelId));
-    control.setAttribute(
-      "aria-label",
-      `Open ${summary.employer}; ${formatWon(summary.pay)} per hour; ${summary.commuteLabel}; ${summary.optionLabel}; ${summary.providerLabel}`,
-    );
-    control.style.left = `${(x(point.commute) / width) * 100}%`;
-    control.style.top = `${(y(point.pay) / height) * 100}%`;
+    control.dataset.hotelPointId = summaries[0].hotelId;
+    control.dataset.pointClusterId = clusterId;
+    control.dataset.hotelPointMembers = summaries.map((summary) => summary.hotelId).join(" ");
+    control.dataset.count = String(summaries.length);
+    control.setAttribute("aria-pressed", String(selected));
+    control.setAttribute("aria-label", summaries.length === 1
+      ? `Open ${summaries[0].employer}; ${formatWon(summaries[0].pay)} per hour; ${summaries[0].commuteLabel}; ${summaries[0].optionLabel}; ${summaries[0].providerLabel}`
+      : `Choose among ${summaries.length} hotels at this pay and commute position`);
+    control.style.left = `${(cluster.x / width) * 100}%`;
+    control.style.top = `${(cluster.y / height) * 100}%`;
     control.addEventListener("click", (event) => {
       event.stopPropagation();
       hideHotelParetoTooltip();
-      selectHotel(summary.hotelId, control);
+      if (summaries.length === 1) selectHotel(summaries[0].hotelId, control);
+      else openPointChoices(cluster.points, "hotel");
     });
-    svg.append(group);
     controlsLayer.append(control);
   }
   elements.hotelParetoTooltip.hidden = true;
@@ -579,6 +760,12 @@ function renderAlbamonParetoChart() {
   );
 
   const frontierGroups = albamonFrontierGroups(points);
+  const clusters = clusterProjectedPoints(
+    points,
+    (point) => ({ x: x(point.commute), y: y(point.pay) }),
+    48,
+  );
+  state.albamonPointClusters = new Map();
   for (const [mode, frontier] of frontierGroups) {
     if (mode === "onsite" && frontier.length > 1) {
       svg.append(svgElement("polyline", {
@@ -603,7 +790,8 @@ function renderAlbamonParetoChart() {
     group.append(
       svgElement("circle", { cx: x(point.commute), cy: y(point.pay), r: point.frontier ? 7 : 4.5, class: "chart-point-dot" }),
     );
-    if (point.frontier) {
+    const pointCluster = clusters.find((cluster) => cluster.points.includes(point));
+    if (point.frontier && pointCluster?.points[0] === point) {
       const direction = index % 2 === 0 ? -1 : 1;
       group.append(svgElement("text", {
         x: x(point.commute) + 10,
@@ -611,25 +799,31 @@ function renderAlbamonParetoChart() {
         class: "chart-point-label",
       }, `${point.mode === "remote" ? "Remote · " : ""}${truncateLabel(point.job.company || point.job.title)}`));
     }
-    const control = createElement(
-      "button",
-      `pareto-point-button${summary.recruitNo === state.selectedId ? " is-selected" : ""}`,
-    );
+    svg.append(group);
+  }
+  for (const [index, cluster] of clusters.entries()) {
+    const summaries = cluster.points.map(albamonPointSummary);
+    const selected = summaries.some((summary) => summary.recruitNo === state.selectedId);
+    const clusterId = `albamon-${index}`;
+    state.albamonPointClusters.set(clusterId, cluster.points);
+    const control = createElement("button", `pareto-point-button${selected ? " is-selected" : ""}`);
     control.type = "button";
-    control.dataset.paretoJobId = summary.recruitNo;
-    control.setAttribute("aria-pressed", String(summary.recruitNo === state.selectedId));
-    control.setAttribute(
-      "aria-label",
-      `Open ${summary.title} at ${summary.company}; ${formatWon(summary.pay)} per hour; ${summary.commuteLabel}; ${summary.schedule}`,
-    );
-    control.style.left = `${(x(point.commute) / width) * 100}%`;
-    control.style.top = `${(y(point.pay) / height) * 100}%`;
+    control.dataset.paretoJobId = String(summaries[0].recruitNo);
+    control.dataset.pointClusterId = clusterId;
+    control.dataset.paretoJobMembers = summaries.map((summary) => summary.recruitNo).join(" ");
+    control.dataset.count = String(summaries.length);
+    control.setAttribute("aria-pressed", String(selected));
+    control.setAttribute("aria-label", summaries.length === 1
+      ? `Open ${summaries[0].title} at ${summaries[0].company}; ${formatWon(summaries[0].pay)} per hour; ${summaries[0].commuteLabel}; ${summaries[0].schedule}`
+      : `Choose among ${summaries.length} jobs at this pay and commute position`);
+    control.style.left = `${(cluster.x / width) * 100}%`;
+    control.style.top = `${(cluster.y / height) * 100}%`;
     control.addEventListener("click", (event) => {
       event.stopPropagation();
       hideParetoTooltip();
-      selectJob(summary.recruitNo, control);
+      if (summaries.length === 1) selectJob(summaries[0].recruitNo, control);
+      else openPointChoices(cluster.points, "albamon");
     });
-    svg.append(group);
     controlsLayer.append(control);
   }
   const frontierCount = frontierPoints.length;
@@ -672,6 +866,8 @@ function showParetoTooltip(pointElement, pointerEvent = null) {
   const point = state.paretoPointsById.get(recruitNo);
   if (!point) return;
   const summary = albamonPointSummary(point);
+  const cluster = state.albamonPointClusters.get(pointElement.dataset.pointClusterId) || [point];
+  const clusterSummaries = cluster.map(albamonPointSummary);
   const tooltip = elements.albamonParetoTooltip;
   const heading = createElement("div", "pareto-tooltip-heading");
   heading.append(
@@ -685,11 +881,17 @@ function showParetoTooltip(pointElement, pointerEvent = null) {
   );
   tooltip.replaceChildren(
     heading,
-    createElement("strong", "pareto-tooltip-company", summary.company),
-    createElement("span", "pareto-tooltip-title", summary.title),
+    createElement("strong", "pareto-tooltip-company", clusterSummaries.length > 1
+      ? `${clusterSummaries.length} jobs share this position`
+      : summary.company),
+    createElement("span", "pareto-tooltip-title", clusterSummaries.length > 1
+      ? clusterSummaries.map((item) => item.company).join(" · ")
+      : summary.title),
     metrics,
     createElement("span", "pareto-tooltip-schedule", summary.schedule),
-    createElement("span", "pareto-tooltip-hint", "Click to open full job details"),
+    createElement("span", "pareto-tooltip-hint", clusterSummaries.length > 1
+      ? "Click to choose the job"
+      : "Click to open full job details"),
   );
   tooltip.hidden = false;
   tooltip.dataset.jobId = String(recruitNo);
@@ -734,6 +936,8 @@ function showHotelParetoTooltip(pointElement, pointerEvent = null) {
   const point = state.hotelPointsById.get(hotelId);
   if (!point) return;
   const summary = hotelPointSummary(point);
+  const cluster = state.hotelPointClusters.get(pointElement.dataset.pointClusterId) || [point];
+  const clusterSummaries = cluster.map(hotelPointSummary);
   const heading = createElement("div", "pareto-tooltip-heading");
   heading.append(
     badge(summary.frontier ? "Pareto frontier" : "Comparable", summary.frontier ? "pareto" : ""),
@@ -746,10 +950,16 @@ function showHotelParetoTooltip(pointElement, pointerEvent = null) {
   );
   elements.hotelParetoTooltip.replaceChildren(
     heading,
-    createElement("strong", "pareto-tooltip-company", summary.employer),
+    createElement("strong", "pareto-tooltip-company", clusterSummaries.length > 1
+      ? `${clusterSummaries.length} hotels share this position`
+      : summary.employer),
     metrics,
-    createElement("span", "pareto-tooltip-schedule", `${summary.optionLabel} · ${summary.providerLabel}`),
-    createElement("span", "pareto-tooltip-hint", "Click to inspect every shift and provider"),
+    createElement("span", "pareto-tooltip-schedule", clusterSummaries.length > 1
+      ? clusterSummaries.map((item) => item.employer).join(" · ")
+      : `${summary.optionLabel} · ${summary.providerLabel}`),
+    createElement("span", "pareto-tooltip-hint", clusterSummaries.length > 1
+      ? "Click to choose the hotel"
+      : "Click to inspect every shift and provider"),
   );
   elements.hotelParetoTooltip.hidden = false;
   elements.hotelParetoTooltip.dataset.hotelId = hotelId;
@@ -759,6 +969,32 @@ function showHotelParetoTooltip(pointElement, pointerEvent = null) {
 function hideHotelParetoTooltip() {
   elements.hotelParetoTooltip.hidden = true;
   delete elements.hotelParetoTooltip.dataset.hotelId;
+}
+
+function openPointChoices(points, kind) {
+  const isHotel = kind === "hotel";
+  elements.pointChoiceTitle.textContent = `Choose one of ${points.length} ${isHotel ? "hotels" : "jobs"}`;
+  const fragment = document.createDocumentFragment();
+  for (const point of points) {
+    const summary = isHotel ? hotelPointSummary(point) : albamonPointSummary(point);
+    const button = createElement("button");
+    button.type = "button";
+    button.append(
+      createElement("strong", "", isHotel ? summary.employer : summary.title),
+      createElement("span", "", `${formatWon(summary.pay)}/hr · ${summary.commuteLabel}`),
+      createElement("small", "", isHotel
+        ? `${summary.area} · ${summary.optionLabel} · ${summary.providerLabel}`
+        : `${summary.company} · ${summary.area} · ${summary.schedule}`),
+    );
+    button.addEventListener("click", () => {
+      elements.pointChoiceDialog.close();
+      if (isHotel) selectHotel(summary.hotelId, button);
+      else selectJob(summary.recruitNo, button);
+    });
+    fragment.append(button);
+  }
+  elements.pointChoiceList.replaceChildren(fragment);
+  elements.pointChoiceDialog.showModal();
 }
 
 function mapPointTooltip({ label, labelKind = "", area, heading, title = "", pay, commute, detail, hint }) {
@@ -831,7 +1067,7 @@ function richMapTooltipOptions() {
 function renderHotelRows(hotels) {
   const rows = hotelRows(hotels, {
     mode: state.hotelPayMode,
-    showAll: elements.hotelShowAll.checked,
+    showAll: true,
   });
   const fragment = document.createDocumentFragment();
   for (const hotel of rows) {
@@ -864,15 +1100,32 @@ function renderHotelRows(hotels) {
     appendText(commuteCell, "small", "cell-secondary", "verified transit");
 
     const optionsCell = createElement("td");
+    const decision = hotelDecisionSummary(hotel);
     appendText(optionsCell, "strong", "", `${hotel.date_count} days · ${hotel.shift_count} times`);
     const providers = (hotel.providers || []).map((provider) => provider.label).join(" · ") || "Provider unavailable";
     appendText(optionsCell, "small", "cell-secondary", `${hotel.job_count} choices · ${providers}`);
+    if (decision.estimatedEarnings) {
+      appendText(
+        optionsCell,
+        "small",
+        "cell-secondary",
+        `${formatWon(decision.estimatedEarnings)} shift · ${formatWon(decision.adjustedHourly)}/hr after round-trip commute`,
+      );
+    }
+    if (decision.hasLateReturnRisk || decision.reviewPayCount) {
+      appendText(
+        optionsCell,
+        "small",
+        "cell-warning",
+        [decision.hasLateReturnRisk ? "late-return check" : "", decision.reviewPayCount ? `${decision.reviewPayCount} pay derivation check` : ""].filter(Boolean).join(" · "),
+      );
+    }
     row.append(nameCell, comparableCell, payCell, commuteCell, optionsCell);
     fragment.append(row);
   }
   elements.hotelRows.replaceChildren(fragment);
   elements.hotelEmpty.hidden = rows.length > 0;
-  elements.hotelTableHeading.textContent = elements.hotelShowAll.checked ? "All hotels" : "Frontier hotels";
+  elements.hotelTableHeading.textContent = "All matching hotels";
   elements.hotelTableFeedback.textContent = `${rows.length} of ${hotels.length} aggregated hotels · updated ${formatDateTime(state.hotelPayload.generated_at)}`;
 }
 
@@ -931,6 +1184,72 @@ function renderAgencyCatalog(catalog, sources, coverage) {
   elements.agencyCatalogRows.replaceChildren(fragment);
 }
 
+function populateHotelFilterOptions(hotels) {
+  const restored = { ...(readStoredJson(HOTEL_FILTER_STORAGE_KEY, {}) || {}), ...hotelFiltersFromUrl() };
+  const selectedRole = elements.hotelRoleFilter.value || restored.role || "all";
+  const selectedProvider = elements.hotelProviderFilter.value || restored.provider || "all";
+  const roles = new Set();
+  const providers = new Map();
+  for (const hotel of hotels || []) {
+    for (const option of hotel.job_options || []) {
+      if (option.role_category) roles.add(option.role_category);
+      for (const agency of option.agencies || []) providers.set(agency, agency);
+    }
+    for (const provider of hotel.providers || []) {
+      if (provider.agency) providers.set(provider.agency, provider.label || provider.agency);
+    }
+  }
+  const roleFragment = document.createDocumentFragment();
+  const allRoles = createElement("option", "", "All roles");
+  allRoles.value = "all";
+  roleFragment.append(allRoles);
+  for (const role of [...roles].sort()) {
+    const option = createElement("option", "", HOTEL_ROLE_LABELS[role] || role);
+    option.value = role;
+    roleFragment.append(option);
+  }
+  elements.hotelRoleFilter.replaceChildren(roleFragment);
+  elements.hotelRoleFilter.value = roles.has(selectedRole) ? selectedRole : "all";
+
+  const providerFragment = document.createDocumentFragment();
+  const allProviders = createElement("option", "", "All providers");
+  allProviders.value = "all";
+  providerFragment.append(allProviders);
+  for (const [agency, label] of [...providers].sort((a, b) => a[1].localeCompare(b[1], "ko"))) {
+    const option = createElement("option", "", label);
+    option.value = agency;
+    providerFragment.append(option);
+  }
+  elements.hotelProviderFilter.replaceChildren(providerFragment);
+  elements.hotelProviderFilter.value = providers.has(selectedProvider) ? selectedProvider : "all";
+}
+
+function renderSourceHealth(items = []) {
+  const fragment = document.createDocumentFragment();
+  for (const source of items) {
+    const card = createElement("article", `source-health-card source-health-card--${source.status || "unknown"}`);
+    const heading = createElement("div", "source-health-heading");
+    heading.append(
+      createElement("strong", "", source.source),
+      badge(source.status === "live" ? "Live" : source.status === "stale_cache" ? "Cached" : "Check source", source.status === "live" ? "evidence" : "warning"),
+    );
+    const age = Number.isFinite(Number(source.age_minutes)) ? `${formatNumber(source.age_minutes)} min old` : "age unavailable";
+    const coverage = source.raw_listing_rows === null || source.raw_listing_rows === undefined
+      ? `${formatNumber(source.fetched_offer_count)} offers`
+      : `${formatNumber(source.raw_listing_rows)} rows · ${formatNumber(source.unique_open_listing_ids)} open · ${formatNumber(source.target_date_offer_count)} matching offers`;
+    card.append(
+      heading,
+      createElement("span", "", `${coverage} · ${age}`),
+      createElement("small", "", source.zero_result_confidence === "observed_empty"
+        ? "Live source returned a valid empty result for this date range."
+        : `Last source pass ${source.elapsed_seconds ?? "?"}s`),
+    );
+    fragment.append(card);
+  }
+  elements.hotelSourceHealth.replaceChildren(fragment);
+  if (!items.length) elements.hotelSourceHealth.append(createElement("p", "", "No source diagnostics were published with this report."));
+}
+
 function syncHotelVisualization() {
   const showingMap = state.hotelVisualization === "map";
   elements.hotelMapVisual.classList.toggle("is-active", showingMap);
@@ -947,7 +1266,7 @@ function syncHotelVisualization() {
   if (!showingMap) {
     elements.hotelMap.hidden = true;
     elements.hotelMapFallback.hidden = true;
-    renderHotelChart(state.hotelPayload?.hotels || []);
+    renderHotelChart(state.filteredHotels);
     return;
   }
   if (state.hotelMap) {
@@ -971,13 +1290,16 @@ function setHotelVisualization(mode) {
 function renderHotelView() {
   const payload = state.hotelPayload;
   if (!payload) return;
-  const hotels = payload.hotels || [];
+  populateHotelFilterOptions(payload.hotels || []);
+  const hotels = filterHotels(payload.hotels || [], hotelFilterControls());
+  state.filteredHotels = hotels;
+  if (state.selectedHotelId && !hotels.some((hotel) => String(hotel.hotel_id) === state.selectedHotelId)) closeDrawer();
   const frontier = hotels.filter((hotel) => isHotelOnFrontier(hotel, state.hotelPayMode));
   const highestPay = Math.max(0, ...frontier.map((hotel) => hotelComparablePay(hotel, state.hotelPayMode) || 0));
-  elements.hotelSummaryTotal.textContent = formatNumber(payload.summary.hotel_count);
+  elements.hotelSummaryTotal.textContent = formatNumber(hotels.length);
   elements.hotelSummaryFrontier.textContent = formatNumber(frontier.length);
   elements.hotelSummaryPay.textContent = formatWon(highestPay);
-  elements.hotelSummaryWeekly.textContent = formatNumber(payload.summary.weekly_allowance_rate_count);
+  elements.hotelSummaryWeekly.textContent = formatNumber(hotels.filter((hotel) => hotel.weekly_allowance_rate_stated).length);
   elements.refreshState.textContent = `Hotel report refreshed ${formatDateTime(payload.generated_at)}`;
   renderOriginControl(payload.origin);
   const searchDates = payload.policy?.search_dates || payload.policy?.weekend_dates || [];
@@ -989,11 +1311,6 @@ function renderHotelView() {
   elements.hotelPayActual.setAttribute("aria-pressed", String(state.hotelPayMode === "actual"));
   elements.hotelPayWeekly.classList.toggle("is-active", state.hotelPayMode === "weekly_allowance");
   elements.hotelPayWeekly.setAttribute("aria-pressed", String(state.hotelPayMode === "weekly_allowance"));
-  elements.hotelReportLinks.replaceChildren(...(payload.reports || []).map((report) => {
-    const link = createElement("a", "", report.label);
-    link.href = report.url;
-    return link;
-  }));
   elements.reportLinks.replaceChildren(...(payload.reports || []).map((report) => {
     const link = createElement("a", "", report.label);
     link.href = report.url;
@@ -1014,11 +1331,44 @@ function renderHotelView() {
   }
   syncHotelVisualization();
   renderHotelRows(hotels);
+  elements.hotelFilterFeedback.textContent = `${hotels.length} of ${payload.hotels?.length || 0} hotels · ${hotels.reduce((sum, hotel) => sum + Number(hotel.job_count || 0), 0)} matching shift options. Filters apply to table, map, and frontier.`;
   renderAgencyCatalog(
     payload.agency_catalog || [],
     payload.sources || {},
     payload.agency_source_coverage || {},
   );
+  renderSourceHealth(payload.source_health || []);
+}
+
+function describeOperationDetail(detail = {}) {
+  const source = cleanText(detail.source);
+  const offers = Number.isFinite(Number(detail.offers)) ? `${formatNumber(detail.offers)} offers` : "";
+  return [source, offers, detail.cache === "hit" ? "recent cache" : ""].filter(Boolean).join(" · ");
+}
+
+function updateHotelOperation(operation) {
+  elements.hotelOperationProgress.hidden = false;
+  elements.hotelOperationMessage.textContent = operation.message || "Working…";
+  elements.hotelOperationDetail.textContent = describeOperationDetail(operation.detail);
+  elements.hotelOperationMeter.value = Number(operation.progress) || 0;
+  elements.hotelOperationMeter.textContent = `${Number(operation.progress) || 0}%`;
+  elements.hotelOperationCancel.disabled = !["queued", "running"].includes(operation.status);
+}
+
+async function waitForOperation(operation, onProgress = () => {}) {
+  let current = operation;
+  while (["queued", "running"].includes(current.status)) {
+    onProgress(current);
+    await new Promise((resolve) => window.setTimeout(resolve, 700));
+    const response = await fetch(`/api/operations/${current.operation_id}`, { cache: "no-store" });
+    current = await response.json();
+    if (!response.ok) throw new Error(current.error || "Background operation disappeared");
+  }
+  onProgress(current);
+  if (current.status === "failed") throw new Error(current.error || "Background operation failed");
+  if (current.status === "cancelled") throw new Error("Operation cancelled");
+  if (current.status !== "succeeded" || !current.result) throw new Error("Background operation returned no result");
+  return current.result;
 }
 
 async function loadHotelData({ force = false } = {}) {
@@ -1043,9 +1393,13 @@ async function loadHotelData({ force = false } = {}) {
         }),
       })
       : await fetch("/api/weekend-agencies", { cache: "no-store" });
-    const payload = await response.json();
+    let payload = await response.json();
     if (!response.ok) throw new Error(payload.error || "Hotel agency data is unavailable");
-    if (payload.payload_version !== 1) throw new Error("Restart the dashboard server to load hotel agency data");
+    if (state.hotelSearchCustom) {
+      state.hotelOperationId = payload.operation_id;
+      payload = await waitForOperation(payload, updateHotelOperation);
+    }
+    if (payload.payload_version !== 2) throw new Error("Restart the dashboard server to load hotel agency data");
     state.hotelPayload = payload;
     renderHotelView();
     return payload;
@@ -1061,6 +1415,8 @@ async function loadHotelData({ force = false } = {}) {
     return null;
   } finally {
     state.hotelLoadingPromise = null;
+    state.hotelOperationId = null;
+    elements.hotelOperationProgress.hidden = true;
     elements.reload.disabled = false;
   }
 }
@@ -1618,26 +1974,23 @@ function updateSelection(previousId, nextId) {
     if (!recruitNo) continue;
     const row = elements.rows.querySelector(`[data-job-id="${recruitNo}"]`);
     if (row) row.classList.toggle("is-selected", recruitNo === nextId);
-    const pointControl = elements.albamonParetoChart.querySelector(`[data-pareto-job-id="${recruitNo}"]`);
+    const selected = recruitNo === nextId;
+    const pointControl = [...elements.albamonParetoChart.querySelectorAll("[data-pareto-job-members]")]
+      .find((control) => (control.dataset.paretoJobMembers || "").split(" ").includes(String(recruitNo)));
     if (pointControl) {
-      const selected = recruitNo === nextId;
       pointControl.classList.toggle("is-selected", selected);
       pointControl.setAttribute("aria-pressed", String(selected));
       const visualPoint = elements.albamonParetoChart.querySelector(`[data-pareto-visual-job-id="${recruitNo}"]`);
       if (visualPoint) visualPoint.classList.toggle("chart-point--selected", selected);
     }
-    const marker = state.markers.get(recruitNo);
-    const job = jobById(recruitNo);
-    if (marker && job) {
-      const selected = recruitNo === nextId;
-      marker.setIcon(markerIcon(job, selected));
-      marker.setZIndexOffset(selected ? 1000 : 0);
-    }
   }
+  if (state.albamonVisualization === "map" && state.map) renderMapMarkers();
 }
 
 function hotelById(hotelId) {
-  return (state.hotelPayload?.hotels || []).find(
+  return (state.filteredHotels || []).find(
+    (hotel) => String(hotel.hotel_id) === String(hotelId),
+  ) || (state.hotelPayload?.hotels || []).find(
     (hotel) => String(hotel.hotel_id) === String(hotelId),
   ) || null;
 }
@@ -1648,20 +2001,16 @@ function updateHotelSelection(previousId, nextId) {
     const selected = String(hotelId) === String(nextId || "");
     const row = elements.hotelRows.querySelector(`[data-hotel-id="${hotelId}"]`);
     if (row) row.classList.toggle("is-selected", selected);
-    const control = elements.hotelChart.querySelector(`[data-hotel-point-id="${hotelId}"]`);
+    const control = [...elements.hotelChart.querySelectorAll("[data-hotel-point-members]")]
+      .find((candidate) => (candidate.dataset.hotelPointMembers || "").split(" ").includes(String(hotelId)));
     if (control) {
       control.classList.toggle("is-selected", selected);
       control.setAttribute("aria-pressed", String(selected));
     }
     const visualPoint = elements.hotelChart.querySelector(`[data-hotel-visual-id="${hotelId}"]`);
     if (visualPoint) visualPoint.classList.toggle("chart-point--selected", selected);
-    const marker = state.hotelMarkers.get(String(hotelId));
-    const hotel = hotelById(hotelId);
-    if (marker && hotel) {
-      marker.setIcon(hotelMarkerIcon(hotel, selected));
-      marker.setZIndexOffset(selected ? 1000 : 0);
-    }
   }
+  if (state.hotelVisualization === "map" && state.hotelMap) renderHotelMapMarkers();
 }
 
 function markerIcon(job, selected) {
@@ -1673,6 +2022,33 @@ function markerIcon(job, selected) {
     iconSize: selected ? [30, 30] : [24, 24],
     iconAnchor: selected ? [8, 27] : [6, 21],
   });
+}
+
+function clusteredMarkerIcon(count, selected, frontier = false) {
+  const classes = ["map-marker", "map-marker--cluster"];
+  if (frontier) classes.push("map-marker--frontier");
+  if (selected) classes.push("map-marker--selected");
+  return window.L.divIcon({
+    className: "",
+    html: `<div class="${classes.join(" ")}"><span>${count}</span></div>`,
+    iconSize: selected ? [34, 34] : [30, 30],
+    iconAnchor: selected ? [10, 30] : [8, 27],
+  });
+}
+
+function mapClusterTooltip(items, kind) {
+  const content = createElement("div", "map-point-tooltip map-cluster-tooltip");
+  appendText(content, "strong", "pareto-tooltip-company", `${items.length} ${kind === "hotel" ? "hotels" : "jobs"} at this location`);
+  const list = createElement("ul", "detail-list");
+  for (const item of items.slice(0, 6)) {
+    const pay = kind === "hotel"
+      ? hotelComparablePay(item, state.hotelPayMode)
+      : Number(item.comparable_hourly_pay) || 0;
+    appendText(list, "li", "", `${item.employer || item.company || item.title} · ${formatWon(pay)}/hr · ${item.transit_minutes ?? "?"} min`);
+  }
+  if (items.length > 6) appendText(list, "li", "", `+ ${items.length - 6} more`);
+  content.append(list, createElement("span", "pareto-tooltip-hint", "Click to choose a result"));
+  return content;
 }
 
 function loadMapLibrary() {
@@ -1800,46 +2176,30 @@ function renderMapMarkers() {
   if (state.albamonVisualization !== "map") return;
   initializeMap();
   if (!state.map) return;
-  const visibleJobs = new Map(
-    state.filteredJobs
-      .filter(hasPlausibleMapLocation)
-      .map((job) => [Number(job.recruit_no), job])
-  );
-  let membershipChanged = false;
-  for (const [recruitNo, marker] of state.markers) {
-    if (visibleJobs.has(recruitNo)) continue;
-    marker.remove();
-    state.markers.delete(recruitNo);
-    membershipChanged = true;
+  for (const marker of new Set(state.markers.values())) marker.remove();
+  state.markers.clear();
+  const groups = new Map();
+  for (const job of state.filteredJobs.filter(hasPlausibleMapLocation)) {
+    const key = `${Number(job.latitude).toFixed(5)},${Number(job.longitude).toFixed(5)}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(job);
   }
-  for (const [recruitNo, job] of visibleJobs) {
-    const latitude = Number(job.latitude);
-    const longitude = Number(job.longitude);
-    const selected = recruitNo === state.selectedId;
-    const existing = state.markers.get(recruitNo);
-    if (existing) {
-      const previousLocation = existing.getLatLng();
-      if (previousLocation.lat !== latitude || previousLocation.lng !== longitude) {
-        membershipChanged = true;
-        existing.setLatLng([latitude, longitude]);
-      }
-      existing.setIcon(markerIcon(job, selected));
-      existing.setZIndexOffset(selected ? 1000 : 0);
-      existing.setTooltipContent(albamonMapTooltip(job));
-      continue;
-    }
-    const marker = window.L.marker([latitude, longitude], {
-      icon: markerIcon(job, selected),
+  for (const jobs of groups.values()) {
+    const first = jobs[0];
+    const selected = jobs.some((job) => Number(job.recruit_no) === state.selectedId);
+    const marker = window.L.marker([Number(first.latitude), Number(first.longitude)], {
+      icon: jobs.length === 1 ? markerIcon(first, selected) : clusteredMarkerIcon(jobs.length, selected, jobs.some((job) => job.pareto_frontier)),
       zIndexOffset: selected ? 1000 : 0,
-      title: `${job.company} — ${job.title}`,
+      title: jobs.length === 1 ? `${first.company} — ${first.title}` : `${jobs.length} jobs at this worksite`,
     });
-    marker.bindTooltip(albamonMapTooltip(job), richMapTooltipOptions());
-    marker.on("click", () => selectJob(recruitNo, elements.map));
+    marker.bindTooltip(jobs.length === 1 ? albamonMapTooltip(first) : mapClusterTooltip(jobs, "job"), richMapTooltipOptions());
+    marker.on("click", () => jobs.length === 1
+      ? selectJob(Number(first.recruit_no), elements.map)
+      : openPointChoices(jobs.map(albamonPointForJob), "albamon"));
     marker.addTo(state.map);
-    state.markers.set(recruitNo, marker);
-    membershipChanged = true;
+    for (const job of jobs) state.markers.set(Number(job.recruit_no), marker);
   }
-  if (membershipChanged) fitAlbamonMap();
+  fitAlbamonMap();
 }
 
 function hotelMarkerIcon(hotel, selected) {
@@ -1887,7 +2247,7 @@ function fitHotelMap() {
   if (!state.hotelMap || !state.hotelPayload || elements.hotelMap.hidden) return;
   const { origin } = state.hotelPayload;
   const bounds = [[origin.latitude, origin.longitude]];
-  for (const hotel of (state.hotelPayload.hotels || []).filter(hasPlausibleMapLocation)) {
+  for (const hotel of state.filteredHotels.filter(hasPlausibleMapLocation)) {
     bounds.push([Number(hotel.latitude), Number(hotel.longitude)]);
   }
   if (bounds.length > 1) state.hotelMap.fitBounds(bounds, { padding: [28, 28], maxZoom: 13 });
@@ -1898,43 +2258,32 @@ function renderHotelMapMarkers() {
   if (state.hotelVisualization !== "map") return;
   initializeHotelMap();
   if (!state.hotelMap) return;
-  const visibleHotels = new Map(
-    (state.hotelPayload?.hotels || [])
-      .filter(hasPlausibleMapLocation)
-      .map((hotel) => [String(hotel.hotel_id), hotel]),
-  );
-  let membershipChanged = false;
-  for (const [hotelId, marker] of state.hotelMarkers) {
-    if (visibleHotels.has(hotelId)) continue;
-    marker.remove();
-    state.hotelMarkers.delete(hotelId);
-    membershipChanged = true;
+  for (const marker of new Set(state.hotelMarkers.values())) marker.remove();
+  state.hotelMarkers.clear();
+  const groups = new Map();
+  for (const hotel of state.filteredHotels.filter(hasPlausibleMapLocation)) {
+    const key = `${Number(hotel.latitude).toFixed(5)},${Number(hotel.longitude).toFixed(5)}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(hotel);
   }
-  for (const [hotelId, hotel] of visibleHotels) {
-    const selected = hotelId === state.selectedHotelId;
-    const existing = state.hotelMarkers.get(hotelId);
-    if (existing) {
-      existing.setIcon(hotelMarkerIcon(hotel, selected));
-      existing.setZIndexOffset(selected ? 1000 : 0);
-      existing.setLatLng([Number(hotel.latitude), Number(hotel.longitude)]);
-      existing.setTooltipContent(hotelMapTooltip(hotel));
-      continue;
-    }
-    const marker = window.L.marker(
-      [Number(hotel.latitude), Number(hotel.longitude)],
-      {
-        icon: hotelMarkerIcon(hotel, selected),
-        zIndexOffset: selected ? 1000 : 0,
-        title: hotel.employer,
-      },
-    );
-    marker.bindTooltip(hotelMapTooltip(hotel), richMapTooltipOptions());
-    marker.on("click", () => selectHotel(hotelId, elements.hotelMap));
+  for (const hotels of groups.values()) {
+    const first = hotels[0];
+    const selected = hotels.some((hotel) => String(hotel.hotel_id) === state.selectedHotelId);
+    const marker = window.L.marker([Number(first.latitude), Number(first.longitude)], {
+      icon: hotels.length === 1
+        ? hotelMarkerIcon(first, selected)
+        : clusteredMarkerIcon(hotels.length, selected, hotels.some((hotel) => isHotelOnFrontier(hotel, state.hotelPayMode))),
+      zIndexOffset: selected ? 1000 : 0,
+      title: hotels.length === 1 ? first.employer : `${hotels.length} hotels at this worksite`,
+    });
+    marker.bindTooltip(hotels.length === 1 ? hotelMapTooltip(first) : mapClusterTooltip(hotels, "hotel"), richMapTooltipOptions());
+    marker.on("click", () => hotels.length === 1
+      ? selectHotel(String(first.hotel_id), elements.hotelMap)
+      : openPointChoices(hotels.map((hotel) => hotelPointForHotel(hotel, state.hotelPayMode)), "hotel"));
     marker.addTo(state.hotelMap);
-    state.hotelMarkers.set(hotelId, marker);
-    membershipChanged = true;
+    for (const hotel of hotels) state.hotelMarkers.set(String(hotel.hotel_id), marker);
   }
-  if (membershipChanged) fitHotelMap();
+  fitHotelMap();
 }
 
 async function requestHotelMapLoad() {
@@ -2012,7 +2361,12 @@ function renderHotelDrawer(hotel) {
   elements.drawerCompany.textContent = `${hotel.station || hotel.area || "Location unavailable"} · ${hotel.transit_minutes ?? "?"} min from ${state.hotelPayload.origin.name}`;
   elements.drawerBody.replaceChildren();
 
-  const providerLinks = (hotel.providers || []).filter((provider) => provider.representative_url);
+  const visibleOptions = hotel.filtered_job_options || hotel.job_options || [];
+  const visibleAgencies = new Set(visibleOptions.flatMap((option) => option.agencies || []));
+  const visibleProviders = (hotel.providers || []).filter((provider) =>
+    !visibleAgencies.size || visibleAgencies.has(provider.agency)
+  );
+  const providerLinks = visibleProviders.filter((provider) => provider.representative_url);
   const routes = directionLinks(hotel);
   if (providerLinks.length || routes) {
     const actions = createElement("div", "detail-actions");
@@ -2034,6 +2388,7 @@ function renderHotelDrawer(hotel) {
 
   const overview = detailSection("Hotel snapshot");
   const grid = createElement("div", "detail-grid");
+  const decision = hotelDecisionSummary(hotel);
   grid.append(
     fact("Best actual/base", `${formatWon(hotel.actual_hourly_max)}/hr`),
     fact("Best daytime", hotel.daytime_actual_hourly_max ? `${formatWon(hotel.daytime_actual_hourly_max)}/hr` : "No 06:00–20:00 shift"),
@@ -2041,18 +2396,24 @@ function renderHotelDrawer(hotel) {
     fact("Verified commute", `${hotel.transit_minutes ?? "?"} min`),
     fact("Available dates", `${hotel.date_count || 0}`),
     fact("Exact shifts", `${hotel.shift_count || 0}`),
+    fact("Best shift earnings", decision.estimatedEarnings ? formatWon(decision.estimatedEarnings) : "Unavailable"),
+    fact("Commute-adjusted rate", decision.adjustedHourly ? `${formatWon(decision.adjustedHourly)}/hr` : "Unavailable"),
   );
   overview.append(grid);
   elements.drawerBody.append(overview);
 
   const shifts = detailSection("Exact shift options");
   shifts.append(detailList(
-    (hotel.shift_options || []).map((option) => {
-      const weekly = option.weekly_allowance_hourly_max
-        ? ` · 주휴* ${formatWon(option.weekly_allowance_hourly_max)}`
+    visibleOptions.map((option) => {
+      const weekly = option.weekly_allowance_hourly_won
+        ? ` · 주휴* ${formatWon(option.weekly_allowance_hourly_won)}`
         : "";
       const providers = (option.best_agencies || []).join(" · ") || "provider check";
-      return `${(option.dates || []).join(", ")} · ${option.shift} · actual ${formatWon(option.actual_hourly_max)}${weekly} · ${providers}`;
+      const decisionText = option.estimated_shift_earnings_won
+        ? ` · ${formatWon(option.estimated_shift_earnings_won)} shift · ${formatWon(option.commute_adjusted_hourly_won)}/hr incl. round-trip commute`
+        : "";
+      const warnings = [option.late_return_risk ? "late-return check" : "", ...(option.pay_warnings || [])].filter(Boolean);
+      return `${option.work_date || (option.dates || []).join(", ")} · ${option.shift} · actual ${formatWon(option.actual_hourly_won ?? option.actual_hourly_max)}${weekly}${decisionText} · ${providers}${warnings.length ? ` · Check: ${warnings.join("; ")}` : ""}`;
     }),
     "No exact shift options were preserved.",
   ));
@@ -2060,7 +2421,7 @@ function renderHotelDrawer(hotel) {
 
   const providers = detailSection("Provider comparison");
   const providerGrid = createElement("div", "detail-grid");
-  for (const provider of hotel.providers || []) {
+  for (const provider of visibleProviders) {
     const item = createElement("div", "fact provider-comparison-card");
     appendText(item, "span", "", provider.label || provider.agency || "Provider");
     appendText(item, "strong", "", `Actual ${formatWon(provider.actual_hourly_max)}`);
@@ -2674,8 +3035,11 @@ async function confirmOriginChange() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ ...candidate, recalculate: true }),
     });
-    const result = await response.json();
+    let result = await response.json();
     if (!response.ok) throw new Error(result.error || "Could not update the commute origin");
+    result = await waitForOperation(result, (operation) => {
+      elements.originConfirmButton.textContent = `${operation.message || "Recalculating"} · ${operation.progress || 0}%`;
+    });
     elements.originConfirmDialog.close();
     closeOriginEditor();
     state.hotelPayload = null;
@@ -2698,7 +3062,7 @@ function validHotelDateRange() {
   return days >= 1 && days <= 31;
 }
 
-async function runHotelDateSearch() {
+async function runHotelDateSearch({ force = false } = {}) {
   if (!validHotelDateRange()) {
     showToast("Choose today or later, with an end date no more than 31 days after the start.", true);
     return;
@@ -2709,23 +3073,19 @@ async function runHotelDateSearch() {
   state.selectedHotelId = null;
   elements.hotelDateSubmit.disabled = true;
   elements.hotelDateStatus.textContent = "Searching every public source and exact shift; longer ranges can take a few minutes because source requests are paced.";
-  await loadHotelData({ force: true });
+  await loadHotelData({ force });
   elements.hotelDateSubmit.disabled = false;
 }
 
 async function resetHotelDateSearch() {
   state.hotelSearchCustom = false;
-  try {
-    window.localStorage.removeItem(HOTEL_SEARCH_STORAGE_KEY);
-  } catch {
-    // The monitored report still loads even if storage is unavailable.
-  }
+  removeStoredValue(HOTEL_SEARCH_STORAGE_KEY);
   const today = localIsoDate();
   elements.hotelStartDate.value = today;
   elements.hotelEndDate.value = today;
   state.hotelPayload = null;
   state.selectedHotelId = null;
-  await loadHotelData({ force: true });
+  await loadHotelData({ force: false });
 }
 
 elements.search.addEventListener("input", () => {
@@ -2878,18 +3238,66 @@ for (const tab of [elements.albamonDeskTab, elements.hotelsDeskTab]) {
 }
 elements.hotelPayActual.addEventListener("click", () => {
   state.hotelPayMode = "actual";
+  persistHotelFilters();
   renderHotelView();
 });
 elements.hotelPayWeekly.addEventListener("click", () => {
   state.hotelPayMode = "weekly_allowance";
+  persistHotelFilters();
   renderHotelView();
 });
-elements.hotelShowAll.addEventListener("change", renderHotelView);
 elements.hotelDateForm.addEventListener("submit", (event) => {
   event.preventDefault();
-  runHotelDateSearch();
+  runHotelDateSearch({ force: false });
 });
+elements.hotelDateRefresh.addEventListener("click", () => runHotelDateSearch({ force: true }));
 elements.hotelDateReset.addEventListener("click", resetHotelDateSearch);
+elements.hotelOperationCancel.addEventListener("click", async () => {
+  if (!state.hotelOperationId) return;
+  elements.hotelOperationCancel.disabled = true;
+  try {
+    const response = await fetch(`/api/operations/${state.hotelOperationId}`, { method: "DELETE" });
+    const operation = await response.json();
+    if (!response.ok) throw new Error(operation.error || "Could not cancel search");
+    updateHotelOperation(operation);
+  } catch (error) {
+    showToast(error.message || "Could not cancel search.", true);
+  }
+});
+for (const input of [
+  elements.hotelFilterStartDate,
+  elements.hotelFilterEndDate,
+  elements.hotelShiftStart,
+  elements.hotelShiftEnd,
+  elements.hotelCommuteFilter,
+  elements.hotelMinPayFilter,
+  elements.hotelRoleFilter,
+  elements.hotelProviderFilter,
+]) {
+  input.addEventListener("change", () => {
+    persistHotelFilters();
+    if (state.hotelPayload) renderHotelView();
+  });
+}
+elements.hotelSearchFilter.addEventListener("input", () => {
+  window.clearTimeout(state.hotelFilterTimer);
+  state.hotelFilterTimer = window.setTimeout(() => {
+    persistHotelFilters();
+    if (state.hotelPayload) renderHotelView();
+  }, 100);
+});
+elements.hotelClearFilters.addEventListener("click", () => {
+  setHotelFilterControls({ minimumPay: "12000" });
+  state.hotelPayMode = "actual";
+  elements.hotelSavedSearch.value = "";
+  removeStoredValue(HOTEL_FILTER_STORAGE_KEY);
+  persistHotelFilters();
+  if (state.hotelPayload) renderHotelView();
+});
+elements.hotelSavedSearch.addEventListener("change", () => applySavedHotelSearch(elements.hotelSavedSearch.value));
+elements.hotelSaveSearch.addEventListener("click", saveCurrentHotelSearch);
+elements.hotelDeleteSearch.addEventListener("click", deleteSavedHotelSearch);
+elements.hotelShareSearch.addEventListener("click", copyHotelSearchLink);
 elements.originEditButton.addEventListener("click", () => {
   elements.originEditor.hidden = false;
   elements.originAddressInput.focus();
@@ -2919,6 +3327,7 @@ elements.clearCompare.addEventListener("click", () => {
 });
 elements.openCompare.addEventListener("click", openComparison);
 elements.closeCompare.addEventListener("click", () => elements.compareDialog.close());
+elements.closePointChoice.addEventListener("click", () => elements.pointChoiceDialog.close());
 window.matchMedia("(max-width: 900px)").addEventListener("change", (event) => {
   if (!event.matches && state.payload) requestMapLoad();
 });
@@ -2947,4 +3356,6 @@ document.addEventListener("keydown", (event) => {
 });
 
 restoreHotelSearchPreferences();
+restoreHotelFilters();
+renderSavedHotelSearches();
 loadData();

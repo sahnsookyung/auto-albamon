@@ -48,10 +48,10 @@ DEFAULT_LATE_NIGHT_OUTPUT = Path("tools/albamon_late_night_route_cache.json")
 DEFAULT_WORKERS = 6
 ORIGIN_STATE_PATH = Path(__file__).with_name("commute_origin.json")
 DEFAULT_ORIGIN = {
-    "name": "잠실동 189-4",
-    "address": "서울특별시 송파구 잠실동 189-4",
-    "latitude": 37.5099418,
-    "longitude": 127.0823805,
+    "name": "잠실새내역",
+    "address": "서울특별시 송파구 올림픽로 140",
+    "latitude": 37.51157,
+    "longitude": 127.08625,
 }
 
 
@@ -387,10 +387,14 @@ def route_vehicle_summary(route: dict[str, Any]) -> list[str]:
 
 
 def summarize_route(
-    payload: dict[str, Any], *, max_minutes: int = MAX_TRANSIT_MINUTES
+    payload: dict[str, Any],
+    *,
+    max_minutes: int = MAX_TRANSIT_MINUTES,
+    origin: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Normalize a Kakao route response and apply the inclusive base cutoff."""
 
+    route_origin = validate_commute_origin(origin or ORIGIN)
     route = fastest_route(payload)
     if route is None:
         return {
@@ -415,7 +419,7 @@ def summarize_route(
         "landing_url": (payload.get("properties") or {}).get("landingURL") or "",
         "distance_excluded": excluded,
         "distance_exclusion_reason": (
-            f"{ORIGIN['name']}에서 대중교통 최단 {minutes}분으로 "
+            f"{route_origin['name']}에서 대중교통 최단 {minutes}분으로 "
             f"{max_minutes}분 이하 기준 미충족"
             if excluded
             else ""
@@ -442,12 +446,14 @@ def read_kakao_route(
     timeout: int = 15,
     quota_budget: KakaoQuotaBudget | None = None,
     request_pacer: KakaoRequestPacer | None = None,
+    origin: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    route_origin = validate_commute_origin(origin or ORIGIN)
     query = urllib.parse.urlencode(
         {
-            "start_x": ORIGIN["longitude"],
-            "start_y": ORIGIN["latitude"],
-            "s_name": ORIGIN["name"],
+            "start_x": route_origin["longitude"],
+            "start_y": route_origin["latitude"],
+            "s_name": route_origin["name"],
             "end_x": longitude,
             "end_y": latitude,
             "e_name": "근무지",
@@ -690,7 +696,9 @@ def assess_job(
     api_key: str,
     quota_budget: KakaoQuotaBudget | None = None,
     request_pacer: KakaoRequestPacer | None = None,
+    origin: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    route_origin = validate_commute_origin(origin or ORIGIN)
     base = {
         "recruit_no": int(job["recruit_no"]),
         "title": str(job.get("title") or ""),
@@ -740,12 +748,13 @@ def assess_job(
             longitude=longitude,
             quota_budget=quota_budget,
             request_pacer=request_pacer,
+            origin=route_origin,
         )
         return {
             **base,
             "latitude": latitude,
             "longitude": longitude,
-            **summarize_route(payload),
+            **summarize_route(payload, origin=route_origin),
             "route_provider": "Kakao Map REST API",
             "route_reuse_basis": "official Kakao public-transit REST route",
             "route_source_checked_at": datetime.now(KOREA_TIMEZONE).isoformat(
@@ -1160,27 +1169,30 @@ def _job_identity(job: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def cache_origin_matches(cache: dict[str, Any] | None) -> bool:
+def cache_origin_matches(
+    cache: dict[str, Any] | None, *, origin: dict[str, Any] | None = None
+) -> bool:
     """Return whether cached routes were measured from the current origin."""
 
+    route_origin = validate_commute_origin(origin or ORIGIN)
     cached = (cache or {}).get("origin")
     if not isinstance(cached, dict):
         return False
     try:
         latitude_matches = math.isclose(
             float(cached.get("latitude")),
-            float(ORIGIN["latitude"]),
+            float(route_origin["latitude"]),
             abs_tol=1e-7,
         )
         longitude_matches = math.isclose(
             float(cached.get("longitude")),
-            float(ORIGIN["longitude"]),
+            float(route_origin["longitude"]),
             abs_tol=1e-7,
         )
     except (TypeError, ValueError):
         return False
     return (
-        str(cached.get("name") or "").strip() == ORIGIN["name"]
+        str(cached.get("name") or "").strip() == route_origin["name"]
         and latitude_matches
         and longitude_matches
     )
@@ -1198,14 +1210,16 @@ def build_cache(
     defer_unverified_routes: bool = False,
     quota_budget: KakaoQuotaBudget | None = None,
     now: datetime | None = None,
+    origin: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    route_origin = validate_commute_origin(origin or ORIGIN)
     jobs = [*(report.get("jobs") or []), *(report.get("logistics_jobs") or [])]
     now = now or datetime.now().astimezone()
     if now.tzinfo is None:
         now = now.astimezone()
     if not 0 <= refresh_hour <= 23:
         raise ValueError("route refresh hour must be between 0 and 23")
-    origin_matches = cache_origin_matches(existing_cache)
+    origin_matches = cache_origin_matches(existing_cache, origin=route_origin)
     existing_routes = (
         (existing_cache or {}).get("routes") or {} if origin_matches else {}
     )
@@ -1319,6 +1333,7 @@ def build_cache(
                     api_key=api_key,
                     quota_budget=quota_budget,
                     request_pacer=request_pacer,
+                    origin=route_origin,
                 ): key
                 for key, job in routes_to_fetch.items()
             }
@@ -1399,7 +1414,7 @@ def build_cache(
                             "landing_url": "https://map.naver.com/",
                             "distance_excluded": excluded,
                             "distance_exclusion_reason": (
-                                f"{ORIGIN['name']}에서 근무 시작 전 Naver 미래시간 "
+                                f"{route_origin['name']}에서 근무 시작 전 Naver 미래시간 "
                                 f"대중교통 {exact_minutes}분으로 "
                                 f"{MAX_TRANSIT_MINUTES}분 이하 기준 미충족"
                                 if excluded
@@ -1456,7 +1471,7 @@ def build_cache(
     return {
         "checked_at": now.isoformat(timespec="seconds"),
         "provider": reused_provider or "Kakao Maps public-transit routing",
-        "origin": ORIGIN,
+        "origin": dict(route_origin),
         "allowed_modes": (
             reused_modes if isinstance(reused_modes, list) else ["bus", "subway/train"]
         ),

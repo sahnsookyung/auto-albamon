@@ -14,6 +14,7 @@ import hashlib
 import json
 import mimetypes
 import re
+import secrets
 import threading
 from datetime import date, datetime, timedelta
 from http import HTTPStatus
@@ -21,15 +22,18 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
+from zoneinfo import ZoneInfo
 
 try:
     from tools import albamon_application_messages as application_messages
     from tools.albamon_pareto import annotate_pareto_frontier
-    from tools.albamon_runtime import atomic_write_text
+    from tools.albamon_runtime import atomic_write_text, exclusive_file_lock
+    from tools.dashboard_operations import OperationRegistry
     from tools.albamon_transit import (
         DEFAULT_KAKAO_QUOTA_STATE,
         DEFAULT_WORKERS,
         ORIGIN,
+        ORIGIN_STATE_PATH,
         KakaoQuotaBudget,
         KakaoRequestPacer,
         build_cache,
@@ -46,16 +50,25 @@ try:
     )
     from tools.weekend_agencies.hotel_digest import aggregate_hotels
     from tools.weekend_agencies.pareto import annotate_hotel_frontiers
+    from tools.weekend_agencies.config import (
+        LOCATION_CACHE_PATH as WEEKEND_LOCATION_CACHE,
+        LOCK_PATH as WEEKEND_REFRESH_LOCK,
+        ROUTE_CACHE_PATH as WEEKEND_ROUTE_CACHE,
+        SEARCH_DATES as MONITORED_HOTEL_DATES,
+    )
     from tools.weekend_agencies.pipeline import reroute_report, run_pipeline
+    from tools.weekend_agencies.report import write_report as write_weekend_report
     from tools.weekend_agencies.routing import read_api_key
 except ModuleNotFoundError:  # Support ``python3 tools/albamon_dashboard.py``.
     import albamon_application_messages as application_messages
     from albamon_pareto import annotate_pareto_frontier
-    from albamon_runtime import atomic_write_text
+    from albamon_runtime import atomic_write_text, exclusive_file_lock
+    from dashboard_operations import OperationRegistry
     from albamon_transit import (
         DEFAULT_KAKAO_QUOTA_STATE,
         DEFAULT_WORKERS,
         ORIGIN,
+        ORIGIN_STATE_PATH,
         KakaoQuotaBudget,
         KakaoRequestPacer,
         build_cache,
@@ -72,7 +85,14 @@ except ModuleNotFoundError:  # Support ``python3 tools/albamon_dashboard.py``.
     )
     from weekend_agencies.hotel_digest import aggregate_hotels
     from weekend_agencies.pareto import annotate_hotel_frontiers
+    from weekend_agencies.config import (
+        LOCATION_CACHE_PATH as WEEKEND_LOCATION_CACHE,
+        LOCK_PATH as WEEKEND_REFRESH_LOCK,
+        ROUTE_CACHE_PATH as WEEKEND_ROUTE_CACHE,
+        SEARCH_DATES as MONITORED_HOTEL_DATES,
+    )
     from weekend_agencies.pipeline import reroute_report, run_pipeline
+    from weekend_agencies.report import write_report as write_weekend_report
     from weekend_agencies.routing import read_api_key
 
 
@@ -87,13 +107,15 @@ DISCORD_STATE = ROOT / "artifacts/albamon/cache/discord_notifications.json"
 DISPOSITIONS = ROOT / "tools/albamon_application_dispositions.json"
 REVIEW_RESOLUTIONS = ROOT / "tools/albamon_review_resolutions.json"
 WEEKEND_AGENCY_REPORT = ROOT / "artifacts/weekend-agencies/latest.json"
-WEEKEND_AGENCY_EXPLORE_PREFIX = ROOT / "artifacts/weekend-agencies/explore/latest"
-WEEKEND_AGENCY_EXPLORE_REPORT = WEEKEND_AGENCY_EXPLORE_PREFIX.with_suffix(".json")
-WEEKEND_AGENCY_EXPLORE_SOURCE_CACHE = (
-    ROOT / "artifacts/weekend-agencies/explore/source_snapshots.json"
-)
+WEEKEND_AGENCY_EXPLORE_ROOT = ROOT / "artifacts/weekend-agencies/explore"
+WEEKEND_AGENCY_EXPLORE_RUNS = WEEKEND_AGENCY_EXPLORE_ROOT / "runs"
+WEEKEND_AGENCY_EXPLORE_CACHES = WEEKEND_AGENCY_EXPLORE_ROOT / "cache"
+WEEKEND_AGENCY_EXPLORE_INDEX = WEEKEND_AGENCY_EXPLORE_ROOT / "index.json"
+MAX_HOTEL_EXPLORATION_RUNS = 32
+HOTEL_EXPLORATION_CACHE_HOURS = 4
 MAX_HOTEL_EXPLORATION_DAYS = 31
 ENV_FILE = ROOT / ".env"
+ALBAMON_REFRESH_LOCK = ROOT / "artifacts/albamon/cache/refresh.lock"
 NEW_WINDOW_HOURS = 24
 CAPITAL_REGION_LATITUDE_BOUNDS = (36.8, 38.3)
 CAPITAL_REGION_LONGITUDE_BOUNDS = (125.8, 128.3)
@@ -107,9 +129,6 @@ REPORT_NAMES = {
     "weekend-agencies-latest.json": WEEKEND_AGENCY_REPORT,
     "weekend-agencies-latest.csv": WEEKEND_AGENCY_REPORT.with_suffix(".csv"),
     "weekend-agencies-latest.md": WEEKEND_AGENCY_REPORT.with_suffix(".md"),
-    "weekend-agencies-explore-latest.json": WEEKEND_AGENCY_EXPLORE_REPORT,
-    "weekend-agencies-explore-latest.csv": WEEKEND_AGENCY_EXPLORE_REPORT.with_suffix(".csv"),
-    "weekend-agencies-explore-latest.md": WEEKEND_AGENCY_EXPLORE_REPORT.with_suffix(".md"),
 }
 STATIC_NAMES = {
     "/": WEB_ROOT / "index.html",
@@ -117,12 +136,20 @@ STATIC_NAMES = {
     "/app.js": WEB_ROOT / "app.js",
     "/job-view-model.mjs": WEB_ROOT / "job-view-model.mjs",
     "/hotel-pareto.mjs": WEB_ROOT / "hotel-pareto.mjs",
+    "/hotel-view-model.mjs": WEB_ROOT / "hotel-view-model.mjs",
+    "/point-layout.mjs": WEB_ROOT / "point-layout.mjs",
+    "/safe-storage.mjs": WEB_ROOT / "safe-storage.mjs",
     "/albamon-pareto.mjs": WEB_ROOT / "albamon-pareto.mjs",
     "/styles.css": WEB_ROOT / "styles.css",
 }
 ALLOWED_DISPOSITIONS = {"apply", "maybe_later", "do_not_apply"}
 LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1"}
-WRITE_LOCK = threading.Lock()
+WRITE_LOCK = threading.RLock()
+HOTEL_REFRESH_LOCK = threading.Lock()
+ORIGIN_REFRESH_LOCK = threading.Lock()
+ROUTING_WORK_LOCK = threading.Lock()
+KOREA_TIMEZONE = ZoneInfo("Asia/Seoul")
+OPERATIONS = OperationRegistry(max_workers=2, max_history=32)
 COMPRESSION_THRESHOLD = 1_024
 SUMMARY_JOB_FIELDS = (
     "recruit_no",
@@ -207,8 +234,6 @@ _CACHE_PAYLOAD: dict[str, Any] | None = None
 _CACHE_DETAILS: dict[int, dict[str, Any]] | None = None
 _HOTEL_CACHE_SIGNATURE: tuple[int, int] | None = None
 _HOTEL_CACHE_PAYLOAD: dict[str, Any] | None = None
-_HOTEL_EXPLORE_CACHE_SIGNATURE: tuple[int, int] | None = None
-_HOTEL_EXPLORE_CACHE_PAYLOAD: dict[str, Any] | None = None
 
 
 class DashboardDataError(RuntimeError):
@@ -680,13 +705,19 @@ def build_weekend_agency_payload(
     *,
     now: datetime | None = None,
     exploration: bool = False,
+    report_id: str = "",
 ) -> dict[str, Any]:
     """Build the lazy-loaded, hotel-level dashboard projection."""
 
     jobs = report.get("jobs") or []
     if not isinstance(jobs, list):
         raise DashboardDataError("Weekend agency report jobs must be a list")
-    observed_date = (now or datetime.now().astimezone()).date()
+    observed_at = now or datetime.now(KOREA_TIMEZONE)
+    if observed_at.tzinfo is None:
+        observed_at = observed_at.replace(tzinfo=KOREA_TIMEZONE)
+    else:
+        observed_at = observed_at.astimezone(KOREA_TIMEZONE)
+    observed_date = observed_at.date()
     current_jobs: list[dict[str, Any]] = []
     for job in jobs:
         if not isinstance(job, dict):
@@ -723,17 +754,61 @@ def build_weekend_agency_payload(
                 if isinstance(entry, dict)
             }
         )
+    generated_at = _parse_datetime(report.get("generated_at"))
+    source_health = []
+    for source_name, metrics in sources.items():
+        if not isinstance(metrics, dict):
+            continue
+        checked_at = _parse_datetime(
+            metrics.get("snapshot_checked_at") or report.get("generated_at")
+        )
+        age_minutes = (
+            max(0, round((observed_at - checked_at.astimezone(KOREA_TIMEZONE)).total_seconds() / 60))
+            if checked_at is not None
+            else None
+        )
+        fetched = int(metrics.get("fetched_offer_count") or 0)
+        raw_rows = metrics.get("raw_listing_rows")
+        source_health.append(
+            {
+                "source": str(source_name),
+                "status": str(metrics.get("status") or "unknown"),
+                "checked_at": checked_at.isoformat(timespec="seconds") if checked_at else "",
+                "age_minutes": age_minutes,
+                "elapsed_seconds": metrics.get("elapsed_seconds"),
+                "fetched_offer_count": fetched,
+                "raw_listing_rows": raw_rows,
+                "unique_listing_ids": metrics.get("unique_listing_ids"),
+                "unique_open_listing_ids": metrics.get("unique_open_listing_ids"),
+                "target_date_offer_count": metrics.get("target_date_offer_count"),
+                "zero_result_confidence": (
+                    "observed_empty"
+                    if fetched == 0 and metrics.get("status") == "live"
+                    else "has_results" if fetched > 0 else "stale_or_unknown"
+                ),
+            }
+        )
+    source_health.sort(key=lambda item: item["source"])
+    if exploration and report_id:
+        report_base = f"/reports/weekend-agencies-explore/{report_id}"
+    else:
+        report_base = "/reports/weekend-agencies-latest"
     return {
-        "payload_version": 1,
+        "payload_version": 2,
         "run_id": str(report.get("run_id") or ""),
-        "generated_at": str(report.get("generated_at") or ""),
+        "report_id": report_id,
+        "generated_at": generated_at.isoformat(timespec="seconds") if generated_at else "",
         "all_sources_live": bool(report.get("all_sources_live")),
         "integrity_checks_passed": bool(report.get("integrity_checks_passed")),
         "policy": policy,
-        "origin": _public_origin(),
+        "origin": {
+            **dict(policy.get("origin") or ORIGIN),
+            "map_links": origin_map_links(dict(policy.get("origin") or ORIGIN)),
+        },
         "exploration": exploration,
-        "monitored_dates": ["2026-08-29", "2026-08-30", "2026-09-05", "2026-09-06"],
+        "monitored_dates": [value.isoformat() for value in MONITORED_HOTEL_DATES],
         "sources": sources,
+        "source_health": source_health,
         "agency_catalog": agency_catalog,
         "agency_source_coverage": agency_source_coverage,
         "summary": {
@@ -757,30 +832,9 @@ def build_weekend_agency_payload(
         },
         "hotels": hotels,
         "reports": [
-            {
-                "label": "Markdown",
-                "url": (
-                    "/reports/weekend-agencies-explore-latest.md"
-                    if exploration
-                    else "/reports/weekend-agencies-latest.md"
-                ),
-            },
-            {
-                "label": "CSV",
-                "url": (
-                    "/reports/weekend-agencies-explore-latest.csv"
-                    if exploration
-                    else "/reports/weekend-agencies-latest.csv"
-                ),
-            },
-            {
-                "label": "JSON",
-                "url": (
-                    "/reports/weekend-agencies-explore-latest.json"
-                    if exploration
-                    else "/reports/weekend-agencies-latest.json"
-                ),
-            },
+            {"label": "Markdown", "url": f"{report_base}.md"},
+            {"label": "CSV", "url": f"{report_base}.csv"},
+            {"label": "JSON", "url": f"{report_base}.json"},
         ],
     }
 
@@ -819,47 +873,239 @@ def _search_dates_from_payload(
     return tuple(start + timedelta(days=offset) for offset in range((end - start).days + 1))
 
 
+def _korea_datetime(value: datetime | None = None) -> datetime:
+    observed = value or datetime.now(KOREA_TIMEZONE)
+    if observed.tzinfo is None:
+        return observed.replace(tzinfo=KOREA_TIMEZONE)
+    return observed.astimezone(KOREA_TIMEZONE)
+
+
+def _exploration_signature(
+    search_dates: tuple[date, ...], *, origin: dict[str, Any] | None = None
+) -> str:
+    route_origin = validate_commute_origin(origin or ORIGIN)
+    material = {
+        "search_dates": [value.isoformat() for value in sorted(set(search_dates))],
+        "origin": route_origin,
+        "weekends_only": False,
+        "minimum_actual_hourly_won": 12_000,
+    }
+    encoded = json.dumps(material, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:24]
+
+
+def _exploration_source_signature(search_dates: tuple[date, ...]) -> str:
+    """Key source HTML separately from route-origin-dependent reports."""
+
+    material = {
+        "search_dates": [value.isoformat() for value in sorted(set(search_dates))],
+        "weekends_only": False,
+    }
+    encoded = json.dumps(material, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:24]
+
+
+def _exploration_prefix(report_id: str) -> Path:
+    if not re.fullmatch(r"[0-9a-f]{20}", str(report_id)):
+        raise ValueError("Invalid hotel exploration report ID")
+    return WEEKEND_AGENCY_EXPLORE_RUNS / str(report_id)
+
+
+def _load_exploration_index() -> dict[str, Any]:
+    if not WEEKEND_AGENCY_EXPLORE_INDEX.exists():
+        return {"version": 1, "searches": {}}
+    try:
+        payload = json.loads(WEEKEND_AGENCY_EXPLORE_INDEX.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {"version": 1, "searches": {}}
+    if not isinstance(payload, dict) or payload.get("version") != 1:
+        return {"version": 1, "searches": {}}
+    if not isinstance(payload.get("searches"), dict):
+        payload["searches"] = {}
+    return payload
+
+
+def _publish_exploration_index(
+    signature: str,
+    *,
+    report_id: str,
+    generated_at: str,
+) -> None:
+    index = _load_exploration_index()
+    searches = index.setdefault("searches", {})
+    searches[signature] = {
+        "report_id": report_id,
+        "generated_at": generated_at,
+    }
+    ranked = sorted(
+        (
+            (key, value)
+            for key, value in searches.items()
+            if isinstance(value, dict) and value.get("report_id")
+        ),
+        key=lambda item: str(item[1].get("generated_at") or ""),
+        reverse=True,
+    )
+    retained = dict(ranked[:MAX_HOTEL_EXPLORATION_RUNS])
+    index["searches"] = retained
+    index["updated_at"] = _korea_datetime().isoformat(timespec="seconds")
+    atomic_write_text(
+        WEEKEND_AGENCY_EXPLORE_INDEX,
+        json.dumps(index, ensure_ascii=False, indent=2) + "\n",
+    )
+    active_ids = {
+        str(value.get("report_id"))
+        for value in retained.values()
+        if isinstance(value, dict)
+    }
+    run_files = sorted(
+        (
+            path
+            for path in WEEKEND_AGENCY_EXPLORE_RUNS.glob("*.json")
+            if re.fullmatch(r"[0-9a-f]{20}", path.stem)
+        ),
+        key=lambda path: path.stat().st_mtime_ns,
+        reverse=True,
+    )
+    retained_run_ids = {
+        active_id
+        for active_id in active_ids
+        if re.fullmatch(r"[0-9a-f]{20}", active_id)
+        and _exploration_prefix(active_id).with_suffix(".json").is_file()
+    }
+    for path in run_files:
+        if len(retained_run_ids) >= MAX_HOTEL_EXPLORATION_RUNS:
+            break
+        retained_run_ids.add(path.stem)
+    for path in run_files:
+        if path.stem in retained_run_ids:
+            continue
+        prefix = _exploration_prefix(path.stem)
+        for suffix in (".json", ".csv", ".md"):
+            artifact = prefix.with_suffix(suffix)
+            if artifact.is_file() and artifact.parent == WEEKEND_AGENCY_EXPLORE_RUNS:
+                artifact.unlink()
+
+
+def _cached_exploration(
+    signature: str, *, observed_at: datetime
+) -> tuple[dict[str, Any], str] | None:
+    entry = (_load_exploration_index().get("searches") or {}).get(signature)
+    if not isinstance(entry, dict):
+        return None
+    report_id = str(entry.get("report_id") or "")
+    if not re.fullmatch(r"[0-9a-f]{20}", report_id):
+        return None
+    path = _exploration_prefix(report_id).with_suffix(".json")
+    if not path.is_file():
+        return None
+    report = load_json_object(path, label="Hotel exploration report")
+    generated_at = _parse_datetime(report.get("generated_at"))
+    if generated_at is None:
+        return None
+    if observed_at - generated_at.astimezone(KOREA_TIMEZONE) > timedelta(
+        hours=HOTEL_EXPLORATION_CACHE_HOURS
+    ):
+        return None
+    return report, report_id
+
+
 def search_weekend_agencies(
-    payload: dict[str, Any], *, now: datetime | None = None
+    payload: dict[str, Any],
+    *,
+    now: datetime | None = None,
+    operation_progress: Any | None = None,
 ) -> dict[str, Any]:
     """Run a non-notifying, independently cached hotel date exploration."""
 
-    global _HOTEL_EXPLORE_CACHE_SIGNATURE, _HOTEL_EXPLORE_CACHE_PAYLOAD
-    observed_at = now or datetime.now().astimezone()
+    observed_at = _korea_datetime(now)
     search_dates = _search_dates_from_payload(payload, today=observed_at.date())
-    with WRITE_LOCK:
-        if WEEKEND_AGENCY_EXPLORE_REPORT.exists() and payload.get("force") is not True:
-            cached = load_json_object(
-                WEEKEND_AGENCY_EXPLORE_REPORT, label="Hotel exploration report"
-            )
-            policy = cached.get("policy") if isinstance(cached.get("policy"), dict) else {}
-            generated_at = _parse_datetime(cached.get("generated_at"))
-            if (
-                policy.get("search_dates")
-                == [value.isoformat() for value in search_dates]
-                and policy.get("weekends_only") is False
-                and generated_at is not None
-                and observed_at - generated_at <= timedelta(hours=4)
-            ):
+    signature = _exploration_signature(search_dates)
+    notify = operation_progress or (lambda _percent, _message, _detail=None: None)
+    with (
+        HOTEL_REFRESH_LOCK,
+        ROUTING_WORK_LOCK,
+        exclusive_file_lock(_workspace_path(WEEKEND_REFRESH_LOCK)),
+    ):
+        if payload.get("force") is not True:
+            cached = _cached_exploration(signature, observed_at=observed_at)
+            if cached is not None:
+                report, report_id = cached
+                notify(95, "Loaded a recent matching search", {"cache": "hit"})
                 return build_weekend_agency_payload(
-                    cached, now=observed_at, exploration=True
+                    report,
+                    now=observed_at,
+                    exploration=True,
+                    report_id=report_id,
                 )
+        report_id = secrets.token_hex(10)
+        output_prefix = _exploration_prefix(report_id)
+        source_cache = (
+            WEEKEND_AGENCY_EXPLORE_CACHES
+            / _exploration_source_signature(search_dates)
+            / "source_snapshots.json"
+        )
+
+        def pipeline_progress(
+            stage: str,
+            completed: int,
+            total: int,
+            detail: dict[str, Any],
+        ) -> None:
+            if stage == "source_start":
+                percent = 5 + round(55 * completed / max(1, total))
+                message = f"Checking {detail.get('source') or 'source'}"
+            elif stage == "source_complete":
+                percent = 5 + round(55 * completed / max(1, total))
+                message = f"Finished {detail.get('source') or 'source'}"
+            elif stage == "routing_start":
+                percent = 70
+                message = "Calculating verified commutes"
+            else:
+                percent = 90
+                message = "Building the hotel comparison"
+            notify(percent, message, {"stage": stage, **detail})
+
         report, _paths = run_pipeline(
             api_key=read_api_key(ENV_FILE),
-            output_prefix=WEEKEND_AGENCY_EXPLORE_PREFIX,
-            source_cache_path=WEEKEND_AGENCY_EXPLORE_SOURCE_CACHE,
+            output_prefix=output_prefix,
+            source_cache_path=source_cache,
             search_dates=search_dates,
             weekends_only=False,
             now=observed_at,
+            origin=dict(ORIGIN),
+            progress=pipeline_progress,
         )
+        notify(94, "Publishing immutable results", {"report_id": report_id})
+        with WRITE_LOCK:
+            _publish_exploration_index(
+                signature,
+                report_id=report_id,
+                generated_at=str(report.get("generated_at") or ""),
+            )
         result = build_weekend_agency_payload(
-            report, now=observed_at, exploration=True
+            report,
+            now=observed_at,
+            exploration=True,
+            report_id=report_id,
         )
-        _HOTEL_EXPLORE_CACHE_SIGNATURE = _path_signature(
-            WEEKEND_AGENCY_EXPLORE_REPORT
-        )
-        _HOTEL_EXPLORE_CACHE_PAYLOAD = result
         return result
+
+
+def start_weekend_agency_search(payload: dict[str, Any]) -> dict[str, Any]:
+    observed_at = _korea_datetime()
+    dates = _search_dates_from_payload(payload, today=observed_at.date())
+    key = f"hotel-search:{_exploration_signature(dates)}"
+    request = dict(payload)
+
+    def task(progress: Any) -> dict[str, Any]:
+        return search_weekend_agencies(
+            request,
+            now=observed_at,
+            operation_progress=progress,
+        )
+
+    return OPERATIONS.start(kind="hotel_search", key=key, task=task)
 
 
 def resolve_origin_address(payload: dict[str, Any]) -> dict[str, Any]:
@@ -880,14 +1126,36 @@ def resolve_origin_address(payload: dict[str, Any]) -> dict[str, Any]:
     return {"origin": {**origin, "map_links": origin_map_links(origin)}}
 
 
-def update_commute_origin(payload: dict[str, Any]) -> dict[str, Any]:
-    """Persist a confirmed origin and rebuild every origin-dependent report."""
+def _workspace_path(path: Path) -> Path:
+    return path if path.is_absolute() else ROOT / path
+
+
+def _snapshot_text_files(paths: list[Path]) -> dict[Path, str | None]:
+    return {
+        path: path.read_text(encoding="utf-8") if path.is_file() else None
+        for path in paths
+    }
+
+
+def _restore_text_files(snapshots: dict[Path, str | None]) -> None:
+    for path, content in snapshots.items():
+        if content is None:
+            if path.is_file():
+                path.unlink()
+        else:
+            atomic_write_text(path, content)
+
+
+def update_commute_origin(
+    payload: dict[str, Any], *, operation_progress: Any | None = None
+) -> dict[str, Any]:
+    """Transactionally publish a confirmed origin and all dependent reports."""
 
     global _HOTEL_CACHE_SIGNATURE, _HOTEL_CACHE_PAYLOAD
-    global _HOTEL_EXPLORE_CACHE_SIGNATURE, _HOTEL_EXPLORE_CACHE_PAYLOAD
     if payload.get("recalculate") is not True:
         raise ValueError("Confirm commute recalculation before changing the origin")
     candidate = validate_commute_origin(payload)
+    previous_origin = dict(ORIGIN)
     api_key = read_api_key(ENV_FILE)
     if not api_key:
         raise ValueError("KAKAO_REST_API_KEY is required to recalculate commutes")
@@ -896,8 +1164,29 @@ def update_commute_origin(payload: dict[str, Any]) -> dict[str, Any]:
         if DEFAULT_KAKAO_QUOTA_STATE.is_absolute()
         else ROOT / DEFAULT_KAKAO_QUOTA_STATE
     )
-    with WRITE_LOCK:
-        saved = save_commute_origin(candidate)
+    notify = operation_progress or (lambda _percent, _message, _detail=None: None)
+    affected_paths = [
+        ORIGIN_STATE_PATH,
+        TRANSIT_CACHE,
+        UNIFIED_REPORT,
+        UNIFIED_PREFIX.with_suffix(".csv"),
+        UNIFIED_PREFIX.with_suffix(".md"),
+        MESSAGE_CACHE,
+        WEEKEND_AGENCY_REPORT,
+        WEEKEND_AGENCY_REPORT.with_suffix(".csv"),
+        WEEKEND_AGENCY_REPORT.with_suffix(".md"),
+        WEEKEND_AGENCY_EXPLORE_INDEX,
+        _workspace_path(WEEKEND_LOCATION_CACHE),
+        _workspace_path(WEEKEND_ROUTE_CACHE),
+    ]
+    with (
+        ORIGIN_REFRESH_LOCK,
+        ROUTING_WORK_LOCK,
+        exclusive_file_lock(ALBAMON_REFRESH_LOCK),
+        exclusive_file_lock(_workspace_path(WEEKEND_REFRESH_LOCK)),
+    ):
+        snapshots = _snapshot_text_files(affected_paths)
+        notify(5, "Loading current reports", None)
         combined = load_json_object(COMBINED_REPORT, label="Combined report")
         existing_cache = (
             load_json_object(TRANSIT_CACHE, label="Transit cache")
@@ -911,27 +1200,83 @@ def update_commute_origin(payload: dict[str, Any]) -> dict[str, Any]:
             existing_cache=existing_cache,
             quota_budget=KakaoQuotaBudget(quota_path),
             defer_unverified_routes=True,
+            origin=candidate,
         )
-        atomic_write_text(
-            TRANSIT_CACHE,
-            json.dumps(cache, ensure_ascii=False, indent=2) + "\n",
+        notify(
+            55,
+            "Albamon commutes recalculated",
+            {"routes": int(cache.get("unique_route_count") or 0)},
         )
-        rebuild_unified_report()
-
         rerouted_reports: list[str] = []
-        for report_path, prefix in (
-            (WEEKEND_AGENCY_REPORT, WEEKEND_AGENCY_REPORT.with_suffix("")),
-            (WEEKEND_AGENCY_EXPLORE_REPORT, WEEKEND_AGENCY_EXPLORE_PREFIX),
-        ):
-            if not report_path.exists():
-                continue
-            report = load_json_object(report_path, label="Hotel agency report")
-            reroute_report(report, api_key=api_key, output_prefix=prefix)
-            rerouted_reports.append(report_path.name)
-        _HOTEL_CACHE_SIGNATURE = None
-        _HOTEL_CACHE_PAYLOAD = None
-        _HOTEL_EXPLORE_CACHE_SIGNATURE = None
-        _HOTEL_EXPLORE_CACHE_PAYLOAD = None
+        rerouted_hotel: dict[str, Any] | None = None
+        if WEEKEND_AGENCY_REPORT.exists():
+            notify(65, "Recalculating monitored hotel commutes", None)
+            hotel_report = load_json_object(
+                WEEKEND_AGENCY_REPORT, label="Hotel agency report"
+            )
+            try:
+                rerouted_hotel, _paths = reroute_report(
+                    hotel_report,
+                    api_key=api_key,
+                    output_prefix=WEEKEND_AGENCY_REPORT.with_suffix(""),
+                    write_outputs=False,
+                    origin=candidate,
+                )
+            except Exception:
+                _restore_text_files(
+                    {
+                        path: snapshots[path]
+                        for path in (
+                            _workspace_path(WEEKEND_LOCATION_CACHE),
+                            _workspace_path(WEEKEND_ROUTE_CACHE),
+                        )
+                    }
+                )
+                raise
+            rerouted_reports.append(WEEKEND_AGENCY_REPORT.name)
+
+        notify(90, "Publishing the new origin and reports", None)
+        try:
+            with WRITE_LOCK:
+                saved = save_commute_origin(candidate, path=ORIGIN_STATE_PATH)
+                atomic_write_text(
+                    TRANSIT_CACHE,
+                    json.dumps(cache, ensure_ascii=False, indent=2) + "\n",
+                )
+                rebuild_unified_report()
+                if rerouted_hotel is not None:
+                    write_weekend_report(
+                        WEEKEND_AGENCY_REPORT.with_suffix(""), rerouted_hotel
+                    )
+                # Existing exploration reports remain immutable and honest about
+                # their old origin, but cannot be selected as a current cache hit.
+                atomic_write_text(
+                    WEEKEND_AGENCY_EXPLORE_INDEX,
+                    json.dumps(
+                        {
+                            "version": 1,
+                            "searches": {},
+                            "invalidated_at": _korea_datetime().isoformat(
+                                timespec="seconds"
+                            ),
+                            "reason": "commute_origin_changed",
+                        },
+                        ensure_ascii=False,
+                        indent=2,
+                    )
+                    + "\n",
+                )
+                _HOTEL_CACHE_SIGNATURE = None
+                _HOTEL_CACHE_PAYLOAD = None
+        except Exception:
+            with WRITE_LOCK:
+                _restore_text_files(snapshots)
+                ORIGIN.clear()
+                ORIGIN.update(previous_origin)
+                _invalidate_dashboard_cache()
+                _HOTEL_CACHE_SIGNATURE = None
+                _HOTEL_CACHE_PAYLOAD = None
+            raise
     return {
         "ok": True,
         "origin": {**saved, "map_links": origin_map_links(saved)},
@@ -941,6 +1286,25 @@ def update_commute_origin(payload: dict[str, Any]) -> dict[str, Any]:
         ),
         "rerouted_hotel_reports": rerouted_reports,
     }
+
+
+def start_commute_origin_update(payload: dict[str, Any]) -> dict[str, Any]:
+    candidate = validate_commute_origin(payload)
+    if payload.get("recalculate") is not True:
+        raise ValueError("Confirm commute recalculation before changing the origin")
+    fingerprint = hashlib.sha256(
+        json.dumps(candidate, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()[:20]
+    request = dict(payload)
+
+    def task(progress: Any) -> dict[str, Any]:
+        return update_commute_origin(request, operation_progress=progress)
+
+    return OPERATIONS.start(
+        kind="origin_recalculation",
+        key=f"origin:{fingerprint}",
+        task=task,
+    )
 
 
 def load_job_detail(recruit_no: int) -> dict[str, Any] | None:
@@ -1247,6 +1611,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
             if path == "/api/weekend-agencies":
                 self._send_json(load_weekend_agency_payload())
                 return
+            operation_match = re.fullmatch(r"/api/operations/([0-9a-f]{20})", path)
+            if operation_match:
+                operation = OPERATIONS.get(operation_match.group(1))
+                if operation is None:
+                    self._send_json({"error": "Operation not found"}, HTTPStatus.NOT_FOUND)
+                else:
+                    self._send_json(operation)
+                return
             detail_match = re.fullmatch(r"/api/jobs/(\d+)", path)
             if detail_match:
                 detail = load_job_detail(int(detail_match.group(1)))
@@ -1258,6 +1630,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
             if path.startswith("/reports/"):
                 name = path.removeprefix("/reports/")
                 report_path = REPORT_NAMES.get(name)
+                exploration_match = re.fullmatch(
+                    r"weekend-agencies-explore/([0-9a-f]{20})\.(json|csv|md)",
+                    name,
+                )
+                if exploration_match:
+                    report_path = _exploration_prefix(
+                        exploration_match.group(1)
+                    ).with_suffix(f".{exploration_match.group(2)}")
                 if report_path is None or not report_path.is_file():
                     self._send_json({"error": "Report not found"}, HTTPStatus.NOT_FOUND)
                     return
@@ -1314,11 +1694,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
             elif path == "/api/dispositions":
                 result = update_job_disposition(payload)
             elif path == "/api/weekend-agencies/search":
-                result = search_weekend_agencies(payload)
+                result = start_weekend_agency_search(payload)
             elif path == "/api/origin/lookup":
                 result = resolve_origin_address(payload)
             else:
-                result = update_commute_origin(payload)
+                result = start_commute_origin_update(payload)
         except (
             DashboardDataError,
             json.JSONDecodeError,
@@ -1329,7 +1709,26 @@ class DashboardHandler(BaseHTTPRequestHandler):
         ) as exc:
             self._send_json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
             return
-        self._send_json(result)
+        self._send_json(
+            result,
+            HTTPStatus.ACCEPTED
+            if path in {"/api/weekend-agencies/search", "/api/origin"}
+            else HTTPStatus.OK,
+        )
+
+    def do_DELETE(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
+        if self._reject_nonlocal_request():
+            return
+        path = urlparse(self.path).path
+        operation_match = re.fullmatch(r"/api/operations/([0-9a-f]{20})", path)
+        if not operation_match:
+            self._send_json({"error": "Not found"}, HTTPStatus.NOT_FOUND)
+            return
+        operation = OPERATIONS.cancel(operation_match.group(1))
+        if operation is None:
+            self._send_json({"error": "Operation not found"}, HTTPStatus.NOT_FOUND)
+            return
+        self._send_json(operation)
 
     def log_message(self, format_string: str, *args: Any) -> None:
         message = re.sub(r"\s+", " ", format_string % args)
@@ -1338,6 +1737,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
 class DashboardServer(ThreadingHTTPServer):
     daemon_threads = True
+
+    def server_close(self) -> None:
+        super().server_close()
+        OPERATIONS.shutdown()
 
 
 def parse_args() -> argparse.Namespace:
