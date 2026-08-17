@@ -11,4 +11,4 @@ requires-python = ">=3.11"
 license = { text = "Private" }
 
 [tool.setuptools]
-packages = ["tools"]
+packages = ["tools", "tools.weekend_agencies", "tools.weekend_agencies.sources"]

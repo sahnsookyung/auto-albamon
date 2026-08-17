@@ -69,6 +69,7 @@ STATIC_NAMES = {
     "/app.js": WEB_ROOT / "app.js",
     "/job-view-model.mjs": WEB_ROOT / "job-view-model.mjs",
     "/hotel-pareto.mjs": WEB_ROOT / "hotel-pareto.mjs",
+    "/albamon-pareto.mjs": WEB_ROOT / "albamon-pareto.mjs",
     "/styles.css": WEB_ROOT / "styles.css",
 }
 ALLOWED_DISPOSITIONS = {"apply", "maybe_later", "do_not_apply"}
