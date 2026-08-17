@@ -186,7 +186,7 @@
       <section class="workspace" aria-label="Job results and map">
         <div class="view-tabs" role="tablist" aria-label="Result view">
           <button class="view-tab is-active" id="table-tab" type="button" role="tab" aria-selected="true" aria-controls="results-panel">List</button>
-          <button class="view-tab" id="map-tab" type="button" role="tab" aria-selected="false" aria-controls="map-panel">Map</button>
+          <button class="view-tab" id="map-tab" type="button" role="tab" aria-selected="false" aria-controls="map-panel">Visual</button>
         </div>
 
         <section class="results-panel" id="results-panel" aria-labelledby="results-heading">
@@ -241,12 +241,22 @@
         <section class="map-panel" id="map-panel" aria-labelledby="map-heading">
           <div class="panel-heading panel-heading--map">
             <div>
-              <p class="eyebrow">WORKSITE MAP</p>
+              <p class="eyebrow" id="visualization-eyebrow">WORKSITE MAP</p>
               <h2 id="map-heading">Commute origin</h2>
             </div>
-            <div class="map-legend" aria-label="Map legend">
-              <span><i class="dot dot--ready"></i>Actionable</span>
-              <span><i class="dot dot--selected"></i>Selected</span>
+            <div class="visualization-controls">
+              <div class="segmented-control visualization-toggle" role="group" aria-label="Albamon visualization">
+                <button class="is-active" id="albamon-map-visual" type="button" aria-pressed="true">Map</button>
+                <button id="albamon-pareto-visual" type="button" aria-pressed="false">Pareto</button>
+              </div>
+              <div class="map-legend" id="map-legend" aria-label="Map legend">
+                <span><i class="dot dot--ready"></i>Actionable</span>
+                <span><i class="dot dot--selected"></i>Selected</span>
+              </div>
+              <div class="chart-legend" id="albamon-chart-legend" aria-label="Pareto chart legend" hidden>
+                <span><i class="dot dot--ready"></i>Comparable</span>
+                <span><i class="dot dot--frontier"></i>Frontier</span>
+              </div>
             </div>
           </div>
           <div id="map" role="application" aria-label="Map of filtered Albamon worksites" hidden></div>
@@ -255,7 +265,8 @@
             <strong id="map-status-title">Map loads after the shortlist</strong>
             <span id="map-status-message">The ranked table is ready first; worksite markers follow in the background.</span>
           </div>
-          <p class="map-caption">Markers use Albamon’s actual worksite coordinates. Commute eligibility uses verified public transport—not straight-line distance.</p>
+          <div class="albamon-pareto-chart" id="albamon-pareto-chart" role="img" aria-label="Scatter plot of Albamon hourly pay and verified commute" hidden></div>
+          <p class="map-caption" id="visualization-caption">Markers use Albamon’s actual worksite coordinates. Commute eligibility uses verified public transport—not straight-line distance.</p>
         </section>
       </section>
       </section>

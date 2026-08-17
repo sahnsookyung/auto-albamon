@@ -9,6 +9,10 @@ import {
   hotelRows,
   isHotelOnFrontier,
 } from "/hotel-pareto.mjs";
+import {
+  albamonFrontierGroups,
+  albamonParetoPoints,
+} from "/albamon-pareto.mjs";
 
 const state = {
   payload: null,
@@ -26,6 +30,7 @@ const state = {
   mapLoadPromise: null,
   originMarker: null,
   markers: new Map(),
+  albamonVisualization: "map",
   filterTimer: null,
   toastTimer: null,
   activeDesk: "albamon",
@@ -88,6 +93,13 @@ const elements = {
   mapTab: document.querySelector("#map-tab"),
   map: document.querySelector("#map"),
   mapHeading: document.querySelector("#map-heading"),
+  visualizationEyebrow: document.querySelector("#visualization-eyebrow"),
+  visualizationCaption: document.querySelector("#visualization-caption"),
+  albamonMapVisual: document.querySelector("#albamon-map-visual"),
+  albamonParetoVisual: document.querySelector("#albamon-pareto-visual"),
+  albamonParetoChart: document.querySelector("#albamon-pareto-chart"),
+  mapLegend: document.querySelector("#map-legend"),
+  albamonChartLegend: document.querySelector("#albamon-chart-legend"),
   mapFallback: document.querySelector("#map-fallback"),
   mapStatusTitle: document.querySelector("#map-status-title"),
   mapStatusMessage: document.querySelector("#map-status-message"),
@@ -243,6 +255,93 @@ function renderHotelChart(hotels) {
     svg.append(group);
   }
   elements.hotelChart.replaceChildren(svg);
+}
+
+function truncateLabel(value, maximum = 18) {
+  const text = cleanText(value);
+  return text.length > maximum ? `${text.slice(0, maximum - 1)}…` : text;
+}
+
+function renderAlbamonParetoChart() {
+  const points = albamonParetoPoints(state.payload?.jobs || []);
+  if (!points.length) {
+    elements.albamonParetoChart.replaceChildren(
+      createElement("p", "chart-empty", "No actionable jobs have both verified commute and comparable pay."),
+    );
+    elements.albamonParetoChart.setAttribute("aria-label", "No comparable Albamon pay and commute pairs");
+    return;
+  }
+
+  const width = 680;
+  const height = 500;
+  const margin = { top: 34, right: 34, bottom: 58, left: 78 };
+  const plotWidth = width - margin.left - margin.right;
+  const plotHeight = height - margin.top - margin.bottom;
+  const commuteValues = points.map((point) => point.commute);
+  const payValues = points.map((point) => point.pay);
+  const xMin = 0;
+  const xMax = Math.max(10, Math.ceil((Math.max(...commuteValues) + 5) / 5) * 5);
+  const yMin = Math.max(0, Math.floor((Math.min(...payValues) - 500) / 1000) * 1000);
+  const yMax = Math.max(yMin + 1000, Math.ceil((Math.max(...payValues) + 500) / 1000) * 1000);
+  const x = (value) => margin.left + ((value - xMin) / (xMax - xMin)) * plotWidth;
+  const y = (value) => margin.top + ((yMax - value) / (yMax - yMin)) * plotHeight;
+  const svg = svgElement("svg", {
+    viewBox: `0 0 ${width} ${height}`,
+    "aria-hidden": "true",
+    focusable: "false",
+  });
+
+  for (let index = 0; index <= 4; index += 1) {
+    const commute = xMin + ((xMax - xMin) * index) / 4;
+    const pay = yMin + ((yMax - yMin) * index) / 4;
+    svg.append(
+      svgElement("line", { x1: x(commute), y1: margin.top, x2: x(commute), y2: height - margin.bottom, class: "chart-grid" }),
+      svgElement("text", { x: x(commute), y: height - 27, class: "chart-axis-label", "text-anchor": "middle" }, `${Math.round(commute)}m`),
+      svgElement("line", { x1: margin.left, y1: y(pay), x2: width - margin.right, y2: y(pay), class: "chart-grid" }),
+      svgElement("text", { x: margin.left - 12, y: y(pay) + 4, class: "chart-axis-label", "text-anchor": "end" }, `₩${Math.round(pay / 100) / 10}k`),
+    );
+  }
+  svg.append(
+    svgElement("text", { x: margin.left + plotWidth / 2, y: height - 5, class: "chart-axis-title", "text-anchor": "middle" }, "Verified one-way commute (minutes) →"),
+    svgElement("text", { x: 16, y: margin.top + plotHeight / 2, class: "chart-axis-title", transform: `rotate(-90 16 ${margin.top + plotHeight / 2})`, "text-anchor": "middle" }, "Reliable comparable hourly pay →"),
+  );
+
+  const frontierGroups = albamonFrontierGroups(points);
+  for (const [mode, frontier] of frontierGroups) {
+    if (mode === "onsite" && frontier.length > 1) {
+      svg.append(svgElement("polyline", {
+        points: frontier.map((point) => `${x(point.commute)},${y(point.pay)}`).join(" "),
+        class: "chart-frontier-line",
+      }));
+    }
+  }
+  const frontierPoints = points.filter((point) => point.frontier);
+  const ordered = [...points.filter((point) => !point.frontier), ...frontierPoints];
+  for (const [index, point] of ordered.entries()) {
+    const classes = ["chart-point"];
+    if (point.frontier) classes.push("chart-point--frontier");
+    if (point.mode === "remote") classes.push("chart-point--remote");
+    const group = svgElement("g", { class: classes.join(" ") });
+    group.append(
+      svgElement("circle", { cx: x(point.commute), cy: y(point.pay), r: point.frontier ? 7 : 4.5 }),
+      svgElement("title", {}, `${point.job.company}: ${point.job.title} — ${formatWon(point.pay)}, ${point.mode === "remote" ? "remote" : `${point.commute} min`}`),
+    );
+    if (point.frontier) {
+      const direction = index % 2 === 0 ? -1 : 1;
+      group.append(svgElement("text", {
+        x: x(point.commute) + 10,
+        y: y(point.pay) + direction * 12,
+        class: "chart-point-label",
+      }, `${point.mode === "remote" ? "Remote · " : ""}${truncateLabel(point.job.company || point.job.title)}`));
+    }
+    svg.append(group);
+  }
+  const frontierCount = frontierPoints.length;
+  elements.albamonParetoChart.replaceChildren(svg);
+  elements.albamonParetoChart.setAttribute(
+    "aria-label",
+    `${points.length} actionable Albamon jobs plotted by hourly pay and commute; ${frontierCount} are on the Pareto frontier`,
+  );
 }
 
 function renderHotelRows(hotels) {
@@ -403,6 +502,45 @@ function setAlbamonMode(mode) {
   if (state.payload) filterJobs();
 }
 
+function syncWorksiteVisualization() {
+  if (!state.payload) return;
+  const showingPareto = state.albamonVisualization === "pareto";
+  elements.albamonMapVisual.classList.toggle("is-active", !showingPareto);
+  elements.albamonMapVisual.setAttribute("aria-pressed", String(!showingPareto));
+  elements.albamonParetoVisual.classList.toggle("is-active", showingPareto);
+  elements.albamonParetoVisual.setAttribute("aria-pressed", String(showingPareto));
+  elements.mapLegend.hidden = showingPareto;
+  elements.albamonChartLegend.hidden = !showingPareto;
+  elements.albamonParetoChart.hidden = !showingPareto;
+
+  if (showingPareto) {
+    elements.map.hidden = true;
+    elements.mapFallback.hidden = true;
+    elements.visualizationEyebrow.textContent = "PAY ↑ · COMMUTE ↓";
+    elements.mapHeading.textContent = `${formatNumber(state.payload.summary.pareto_frontier_count || 0)} unbeaten choices`;
+    elements.visualizationCaption.textContent = "Every point is actionable with reliable comparable pay and verified commute. Gold choices are not beaten on both axes; remote roles are compared separately at 0 minutes.";
+    renderAlbamonParetoChart();
+    return;
+  }
+
+  elements.visualizationEyebrow.textContent = "WORKSITE MAP";
+  elements.mapHeading.textContent = `From ${state.payload.origin.name}`;
+  elements.visualizationCaption.textContent = "Markers use Albamon’s actual worksite coordinates. Commute eligibility uses verified public transport—not straight-line distance.";
+  elements.map.hidden = !state.map;
+  elements.mapFallback.hidden = Boolean(state.map);
+  renderMapMarkers();
+}
+
+function setAlbamonVisualization(mode) {
+  state.albamonVisualization = mode === "pareto" ? "pareto" : "map";
+  syncWorksiteVisualization();
+  if (state.albamonVisualization === "map") {
+    requestMapLoad().then(() => {
+      if (state.map) window.setTimeout(() => state.map.invalidateSize(), 20);
+    });
+  }
+}
+
 function formatRouteClock(value) {
   if (!value) return "time unavailable";
   const date = new Date(value);
@@ -527,7 +665,6 @@ function showToast(message, isError = false) {
 
 function renderHeader() {
   const { payload } = state;
-  elements.mapHeading.textContent = `From ${payload.origin.name}`;
   elements.refreshState.textContent = payload.route_origin_current
     ? `Report refreshed ${formatDateTime(payload.generated_at)}`
     : "Routes need refresh from the new origin";
@@ -560,6 +697,7 @@ function renderHeader() {
     link.download = "";
     elements.reportLinks.append(link);
   }
+  syncWorksiteVisualization();
 }
 
 function populateDistricts() {
@@ -609,7 +747,7 @@ function filterJobs() {
   elements.paretoExplainer.hidden = !showingPareto;
   elements.resultsEyebrow.textContent = showingPareto ? "PAY–COMMUTE FRONTIER" : "RANKED RESULTS";
   renderResults();
-  renderMapMarkers();
+  syncWorksiteVisualization();
 }
 
 function badge(text, variant = "") {
@@ -915,16 +1053,20 @@ function loadMapLibrary() {
 }
 
 async function requestMapLoad() {
-  if (state.map) return;
+  if (state.map) {
+    syncWorksiteVisualization();
+    return;
+  }
   try {
     await loadMapLibrary();
-    elements.map.hidden = false;
-    elements.mapFallback.hidden = true;
     initializeMap();
     renderMapMarkers();
+    syncWorksiteVisualization();
   } catch {
-    elements.map.hidden = true;
-    elements.mapFallback.hidden = false;
+    if (state.albamonVisualization === "map") {
+      elements.map.hidden = true;
+      elements.mapFallback.hidden = false;
+    }
     const loader = elements.mapFallback.querySelector(".map-loader");
     if (loader) loader.hidden = true;
     elements.mapStatusTitle.textContent = "Map unavailable";
@@ -952,6 +1094,7 @@ function initializeMap() {
 }
 
 function renderMapMarkers() {
+  if (state.albamonVisualization !== "map") return;
   initializeMap();
   if (!state.map) return;
   const visibleJobs = new Map(
@@ -1295,9 +1438,13 @@ function setMobileView(view) {
   elements.tableTab.setAttribute("aria-selected", String(!showMap));
   elements.mapTab.setAttribute("aria-selected", String(showMap));
   if (showMap) {
-    requestMapLoad().then(() => {
-      if (state.map) window.setTimeout(() => state.map.invalidateSize(), 20);
-    });
+    if (state.albamonVisualization === "map") {
+      requestMapLoad().then(() => {
+        if (state.map) window.setTimeout(() => state.map.invalidateSize(), 20);
+      });
+    } else {
+      syncWorksiteVisualization();
+    }
   }
 }
 
@@ -1444,6 +1591,8 @@ elements.albamonDeskTab.addEventListener("click", () => setDesk("albamon"));
 elements.hotelsDeskTab.addEventListener("click", () => setDesk("hotels"));
 elements.albamonAllTab.addEventListener("click", () => setAlbamonMode("all"));
 elements.albamonParetoTab.addEventListener("click", () => setAlbamonMode("pareto"));
+elements.albamonMapVisual.addEventListener("click", () => setAlbamonVisualization("map"));
+elements.albamonParetoVisual.addEventListener("click", () => setAlbamonVisualization("pareto"));
 for (const tab of [elements.albamonDeskTab, elements.hotelsDeskTab]) {
   tab.addEventListener("keydown", (event) => {
     if (!["ArrowLeft", "ArrowRight"].includes(event.key)) return;
