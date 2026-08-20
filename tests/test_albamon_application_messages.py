@@ -12,6 +12,7 @@ from tools.albamon_application_messages import (
     classify_role,
     comparable_hourly_pay,
     commute_policy_for_job,
+    door_to_door_hourly_pay,
     fallback_regular_spec,
     load_transit_cache,
     load_message_cache,
@@ -976,6 +977,149 @@ class AlbamonApplicationMessageTests(unittest.TestCase):
         )
         self.assertEqual(14_286, result["hourly_equivalent"])
         self.assertIn("7시간", result["basis"])
+        self.assertTrue(result["reliable"])
+        self.assertEqual(100_000, result["shift_earnings_won"])
+
+    def test_daily_pay_without_shift_hours_is_not_assigned_an_eight_hour_guess(self):
+        result = comparable_hourly_pay(
+            {
+                "recruit_no": 999999993,
+                "salary_type": "일급",
+                "salary": "150,000원",
+                "title": "행사 운영 스태프",
+                "work_time": "시간협의",
+            }
+        )
+
+        self.assertEqual(0, result["hourly_equivalent"])
+        self.assertFalse(result["reliable"])
+        self.assertIsNone(result["paid_shift_hours"])
+        self.assertEqual(150_000, result["shift_earnings_won"])
+        self.assertIn("Pareto", result["caution"])
+
+    def test_daily_pay_uses_a_detail_verified_selectable_shift(self):
+        record = {
+            "recruit_no": 999999996,
+            "salary_type": "일급",
+            "salary": "150,000원",
+            "title": "행사 안내원",
+            "work_time": "시간협의",
+            "weekend_shift_options": ["일 12:30~18:00"],
+            "transit_minutes": 15,
+        }
+
+        pay = comparable_hourly_pay(record)
+        total_time = door_to_door_hourly_pay(record, pay)
+
+        self.assertTrue(pay["reliable"])
+        self.assertEqual(27_273, pay["hourly_equivalent"])
+        self.assertEqual(5.5, pay["paid_shift_hours"])
+        self.assertIn("선택 가능 근무조", pay["basis"])
+        self.assertEqual(25_000, total_time["hourly_equivalent"])
+
+    def test_team_total_override_is_never_treated_as_individual_daily_pay(self):
+        result = comparable_hourly_pay(
+            {
+                "recruit_no": 999999997,
+                "company": "이음",
+                "title": "[주말 부업] 포토부스 행사 매니저 & 스탭 모집",
+                "salary_type": "일급",
+                "salary": "150,000원",
+                "work_time": "10:00~20:00",
+            }
+        )
+
+        self.assertFalse(result["reliable"])
+        self.assertEqual(0, result["hourly_equivalent"])
+        self.assertIsNone(result["shift_earnings_won"])
+        self.assertIn("팀당 총액", result["basis"])
+
+    def test_door_to_door_rate_uses_fixed_earnings_span_and_round_trip(self):
+        record = {
+            "recruit_no": 999999994,
+            "salary_type": "일급",
+            "salary": "150,000원",
+            "title": "행사 운영 스태프",
+            "work_time": "10:00~22:00",
+            "work_time_option": "휴게시간 240분",
+            "transit_minutes": 51,
+        }
+
+        pay = comparable_hourly_pay(record)
+        total_time = door_to_door_hourly_pay(record, pay)
+
+        self.assertEqual(18_750, pay["hourly_equivalent"])
+        self.assertEqual(8, pay["paid_shift_hours"])
+        self.assertEqual(12, pay["shift_span_hours"])
+        self.assertEqual(822, total_time["total_minutes"])
+        self.assertEqual(10_949, total_time["hourly_equivalent"])
+
+    def test_door_to_door_rate_requires_exact_shift_span(self):
+        record = {
+            "recruit_no": 999999995,
+            "salary_type": "일급",
+            "salary": "150,000원",
+            "work_time": "시간협의",
+            "transit_minutes": 20,
+        }
+        total_time = door_to_door_hourly_pay(
+            record, comparable_hourly_pay(record)
+        )
+
+        self.assertIsNone(total_time["hourly_equivalent"])
+        self.assertIn("근무시간", total_time["basis"])
+
+    def test_hourly_rate_does_not_invent_shift_earnings_without_paid_duration(self):
+        record = {
+            "recruit_no": 999999998,
+            "salary_type": "시급",
+            "salary": "15,000원",
+            "work_time": "10:00~18:00",
+            "work_time_option": "",
+            "transit_minutes": 20,
+        }
+
+        pay = comparable_hourly_pay(record)
+        total_time = door_to_door_hourly_pay(record, pay)
+
+        self.assertTrue(pay["reliable"])
+        self.assertEqual(15_000, pay["hourly_equivalent"])
+        self.assertIsNone(pay["shift_earnings_won"])
+        self.assertIsNone(total_time["hourly_equivalent"])
+        self.assertIn("총수입", total_time["basis"])
+
+    def test_reranking_places_unverified_pay_after_reliable_pay(self):
+        base = {
+            "work_time_option": "",
+            "title": "주말 알바",
+            "work_days": "주말(토, 일)",
+            "weekend_compatibility_basis": "weekend (Sat, Sun) detail field",
+            "duration_review_status": "verified_shorter",
+            "hard_requirements": [],
+            "application_methods": ["online"],
+            "transit_minutes": 10,
+        }
+        records = [
+            {
+                **base,
+                "recruit_no": 1,
+                "salary_type": "일급",
+                "salary": "150,000원",
+                "work_time": "시간협의",
+            },
+            {
+                **base,
+                "recruit_no": 2,
+                "salary_type": "시급",
+                "salary": "12,000원",
+                "work_time": "10:00~18:00",
+            },
+        ]
+
+        rerank_records(records)
+
+        self.assertEqual([2, 1], [record["recruit_no"] for record in records])
+        self.assertFalse(records[1]["pay_comparison_reliable"])
 
     def test_misleading_headline_pay_uses_detail_review_override(self):
         popup = comparable_hourly_pay(

@@ -28,7 +28,10 @@ try:
     from tools import albamon_application_messages as application_messages
     from tools.albamon_pareto import annotate_pareto_frontier
     from tools.albamon_runtime import atomic_write_text, exclusive_file_lock
-    from tools.dashboard_operations import OperationRegistry
+    from tools.dashboard_operations import (
+        OperationCapacityError,
+        OperationRegistry,
+    )
     from tools.albamon_transit import (
         DEFAULT_KAKAO_QUOTA_STATE,
         DEFAULT_WORKERS,
@@ -63,7 +66,7 @@ except ModuleNotFoundError:  # Support ``python3 tools/albamon_dashboard.py``.
     import albamon_application_messages as application_messages
     from albamon_pareto import annotate_pareto_frontier
     from albamon_runtime import atomic_write_text, exclusive_file_lock
-    from dashboard_operations import OperationRegistry
+    from dashboard_operations import OperationCapacityError, OperationRegistry
     from albamon_transit import (
         DEFAULT_KAKAO_QUOTA_STATE,
         DEFAULT_WORKERS,
@@ -167,6 +170,15 @@ SUMMARY_JOB_FIELDS = (
     "salary_type",
     "salary",
     "comparable_hourly_pay",
+    "work_hourly_pay",
+    "pay_comparison_reliable",
+    "pay_comparison_basis",
+    "estimated_shift_earnings_won",
+    "paid_shift_hours",
+    "shift_span_hours",
+    "door_to_door_hourly_pay",
+    "total_time_commitment_minutes",
+    "door_to_door_pay_basis",
     "work_days",
     "work_time",
     "work_time_option",
@@ -1699,6 +1711,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 result = resolve_origin_address(payload)
             else:
                 result = start_commute_origin_update(payload)
+        except OperationCapacityError as exc:
+            self._send_json(
+                {"error": str(exc)}, HTTPStatus.SERVICE_UNAVAILABLE
+            )
+            return
         except (
             DashboardDataError,
             json.JSONDecodeError,

@@ -78,6 +78,30 @@ test("pay and date sorting reuse normalized numeric values", () => {
   );
 });
 
+test("unverified pay cannot satisfy pay filters or outrank verified work-hour pay", () => {
+  const jobs = [
+    job(1, {
+      comparable_hourly_pay: 18_750,
+      pay_comparison_reliable: false,
+    }),
+    job(2, {
+      comparable_hourly_pay: 12_000,
+      work_hourly_pay: 12_000,
+      pay_comparison_reliable: true,
+    }),
+  ];
+  const models = buildJobViewModels(jobs);
+
+  assert.deepEqual(
+    filterAndSortJobModels(models, criteria({ sort: "pay" })).map((item) => item.recruit_no),
+    [2, 1],
+  );
+  assert.deepEqual(
+    filterAndSortJobModels(models, criteria({ minPay: 12_000 })).map((item) => item.recruit_no),
+    [2],
+  );
+});
+
 test("shortlist filtering and easy-apply checks stay independent", () => {
   const jobs = [
     job(1),

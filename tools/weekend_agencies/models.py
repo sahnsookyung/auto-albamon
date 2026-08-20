@@ -17,6 +17,7 @@ class PayBreakdown:
     actual_basis: str
     weekly_allowance_basis: str = "not_stated"
     pay_frequency: str = "hourly"
+    advertised_shift_won: int | None = None
     warnings: tuple[str, ...] = ()
 
     def as_dict(self) -> dict[str, Any]:

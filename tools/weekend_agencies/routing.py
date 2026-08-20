@@ -73,6 +73,11 @@ KNOWN_LOCATIONS: dict[str, tuple[float, float, str]] = {
     "페어몬트앰배서더서울호텔": (37.5254, 126.9292, "curated venue routing anchor"),
     "코트야드메리어트서울명동": (37.5660, 126.9824, "curated venue routing anchor"),
     "포포인츠바이쉐라톤서울강남": (37.5236, 127.0364, "curated venue routing anchor"),
+    "에이씨ac호텔바이메리어트서울강남": (
+        37.5014,
+        127.03545,
+        "curated venue routing anchor",
+    ),
     "더블트리바이힐튼서울판교": (37.3942, 127.1121, "curated venue routing anchor"),
     "보코서울명동": (37.5582, 126.9786, "curated venue routing anchor"),
     "세빛섬": (37.5118, 126.9951, "curated venue routing anchor"),

@@ -2,7 +2,7 @@ import threading
 import time
 import unittest
 
-from tools.dashboard_operations import OperationRegistry
+from tools.dashboard_operations import OperationCapacityError, OperationRegistry
 
 
 class DashboardOperationTests(unittest.TestCase):
@@ -54,6 +54,27 @@ class DashboardOperationTests(unittest.TestCase):
                 time.sleep(0.01)
             self.assertEqual("cancelled", completed["status"])
             self.assertNotIn("result", completed)
+        finally:
+            release.set()
+            registry.shutdown()
+
+    def test_capacity_rejects_new_keys_but_preserves_single_flight(self):
+        registry = OperationRegistry(max_workers=1, max_history=1)
+        entered = threading.Event()
+        release = threading.Event()
+
+        def task(progress):
+            entered.set()
+            release.wait(timeout=2)
+            return {"ok": True}
+
+        try:
+            first = registry.start(kind="search", key="same", task=task)
+            self.assertTrue(entered.wait(timeout=1))
+            duplicate = registry.start(kind="search", key="same", task=task)
+            self.assertEqual(first["operation_id"], duplicate["operation_id"])
+            with self.assertRaisesRegex(OperationCapacityError, "Too many"):
+                registry.start(kind="search", key="different", task=task)
         finally:
             release.set()
             registry.shutdown()

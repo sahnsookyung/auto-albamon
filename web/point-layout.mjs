@@ -1,3 +1,6 @@
+/** Maximum SVG viewBox distance that still reads as one plotted position. */
+export const PARETO_SHARED_POSITION_DISTANCE = 4;
+
 /** Group chart points whose accessible hit targets would overlap. */
 export function clusterProjectedPoints(points, project, minimumDistance = 26) {
   const centroid = (clusterPoints) => ({
@@ -32,4 +35,31 @@ export function clusterProjectedPoints(points, project, minimumDistance = 26) {
     clusters.splice(closest.right, 1);
   }
   return clusters;
+}
+
+/**
+ * Place accessible controls without moving the data they represent.
+ * Grouped controls use the cluster centroid; ungrouped controls stay on each
+ * point's exact projected coordinate while retaining the shared chooser.
+ */
+export function interactivePointControls(clusters, project, groupOverlaps = true) {
+  return (clusters || []).flatMap((cluster, clusterIndex) => {
+    const members = cluster.points || [];
+    if (!members.length) return [];
+    if (groupOverlaps || members.length === 1) {
+      return [{
+        x: cluster.x,
+        y: cluster.y,
+        point: members[0],
+        members,
+        clusterIndex,
+      }];
+    }
+    return members.map((point) => ({
+      ...project(point),
+      point,
+      members,
+      clusterIndex,
+    }));
+  });
 }

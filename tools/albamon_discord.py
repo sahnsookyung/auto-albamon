@@ -325,6 +325,11 @@ def format_job_message(record: dict[str, Any], *, position: int, total: int) -> 
         f"{record.get('salary_type', '')} {record.get('salary', '')}", limit=80
     )
     hourly = int(record.get("comparable_hourly_pay") or 0)
+    hourly_text = (
+        f"근무 환산시급 약 {hourly:,}원"
+        if record.get("pay_comparison_reliable") is not False and hourly > 0
+        else "근무 환산시급 확인 필요"
+    )
     commute = record.get("transit_minutes")
     transfers = record.get("transit_transfers")
     remote_job = bool(
@@ -394,7 +399,7 @@ def format_job_message(record: dict[str, Any], *, position: int, total: int) -> 
             ),
             f"**{company} — {title}**",
             url,
-            f"💰 {salary} · 비교 시급 약 {hourly:,}원",
+            f"💰 {salary} · {hourly_text}",
             f"📍 {area}",
             f"🗓️ {schedule}",
             f"🚇 {commute_text}",
@@ -544,6 +549,7 @@ def _notify_new_jobs(
             "actionable_jobs": len(current_jobs),
             "new_jobs": len(new_jobs),
             "sent_jobs": 0,
+            "preview_messages": len(new_jobs),
         }
 
     for position, (identity, record) in enumerate(new_jobs, start=1):
@@ -566,6 +572,7 @@ def _notify_new_jobs(
         "actionable_jobs": len(current_jobs),
         "new_jobs": len(new_jobs),
         "sent_jobs": len(new_jobs),
+        "sent_messages": len(new_jobs),
     }
 
 

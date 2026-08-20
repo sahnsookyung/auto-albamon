@@ -126,6 +126,19 @@ function deriveHotel(hotel, options) {
     (Number(right.actual_hourly_max) || 0) - (Number(left.actual_hourly_max) || 0) ||
     String(left.label).localeCompare(String(right.label), "ko")
   );
+  const offerCount = options.reduce((total, option) => {
+    const explicit = numeric(option.offer_count);
+    if (explicit !== null && explicit >= 0) return total + explicit;
+    const inferred = option.provider_offers?.length || option.agencies?.length || 1;
+    return total + inferred;
+  }, 0);
+  const crossAgencyDuplicateCount = options.filter((option) => {
+    if (option.cross_agency_duplicate === true) return true;
+    const agencies = option.provider_offers?.length
+      ? option.provider_offers.map((offer) => offer.agency)
+      : option.agencies || [];
+    return new Set(agencies.filter(Boolean)).size > 1;
+  }).length;
   const daytime = options
     .filter((option) => option.daytime === true)
     .map((option) => numeric(option.actual_hourly_won))
@@ -142,6 +155,8 @@ function deriveHotel(hotel, options) {
     date_count: dates.length,
     shift_count: shifts.length,
     job_count: options.length,
+    offer_count: offerCount,
+    cross_agency_duplicate_count: crossAgencyDuplicateCount,
     roles: [...new Set(options.map((option) => option.role_category).filter(Boolean))].sort(),
     providers,
     source_snapshot_stale: options.some((option) => option.source_snapshot_stale === true),
@@ -175,19 +190,20 @@ export function filterHotels(hotels, filters = {}) {
   for (const hotel of hotels || []) {
     const commute = numeric(hotel.transit_minutes);
     if (maxCommute !== null && (commute === null || commute > maxCommute)) continue;
-    if (query) {
-      const haystack = [
-        hotel.employer,
-        hotel.area,
-        hotel.station,
-        ...(hotel.roles || []),
-        ...(hotel.providers || []).flatMap((provider) => [provider.label, provider.agency]),
-      ].map(text).join(" ").toLocaleLowerCase("ko");
-      if (!haystack.includes(query)) continue;
-    }
     const options = normalizedOptions(hotel).filter((option) => optionMatches(option, filters));
     if (!options.length) continue;
     const derived = deriveHotel(hotel, options);
+    if (query) {
+      const haystack = [
+        derived.employer,
+        derived.area,
+        derived.station,
+        ...derived.roles,
+        ...derived.filtered_job_options.map((option) => option.title),
+        ...derived.providers.flatMap((provider) => [provider.label, provider.agency]),
+      ].map(text).join(" ").toLocaleLowerCase("ko");
+      if (!haystack.includes(query)) continue;
+    }
     const comparable = filters.payMode === "weekly_allowance"
       ? Number(derived.weekly_allowance_hourly_max) || Number(derived.actual_hourly_max)
       : Number(derived.actual_hourly_max);

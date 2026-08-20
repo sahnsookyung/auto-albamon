@@ -163,7 +163,7 @@ class AlbamonDashboardTests(unittest.TestCase):
                     albamon_dashboard,
                     "reroute_report",
                     side_effect=fail_after_cache_side_effect,
-                ),
+                ) as reroute,
                 patch.object(albamon_dashboard, "save_commute_origin") as save_origin,
             ):
                 with self.assertRaisesRegex(RuntimeError, "hotel reroute failed"):
@@ -178,6 +178,15 @@ class AlbamonDashboardTests(unittest.TestCase):
                     )
 
             save_origin.assert_not_called()
+            self.assertEqual(
+                {
+                    "name": "Test origin",
+                    "address": "서울특별시 송파구 올림픽로 1",
+                    "latitude": 37.51,
+                    "longitude": 127.1,
+                },
+                reroute.call_args.kwargs["origin"],
+            )
             self.assertEqual(previous_origin, albamon_dashboard.ORIGIN)
             self.assertFalse(paths["ORIGIN_STATE_PATH"].exists())
             self.assertEqual(

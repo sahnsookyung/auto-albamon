@@ -525,11 +525,27 @@ python3 tools/albamon_transit.py \
 ```
 
 The unified application ranking is strict pay-first and exact-commute-second.
-Mixed salary units are converted to a comparable hourly amount using the
-displayed paid shift hours. A lower-paying job cannot move above a higher-paying
-job because of commute or fit; commute is the first tie-break only when reliable
-comparable pay is equal. Schedule certainty, short duration, hard requirements,
-and application friction remain visible as diagnostic fit scores and cautions.
+Mixed salary units are converted to a reliable **work-hour equivalent** only
+when the posting supplies enough shift evidence. Daily pay is divided by the
+displayed shift span minus an explicitly stated break; monthly pay requires a
+stated weekly schedule. Unknown daily, weekly, or monthly hours are never filled
+with an assumed 8-, 40-, or 209-hour value: those jobs retain their advertised
+pay, are labelled unverified, and are excluded from pay ranking and Pareto
+membership. A lower-paying job cannot move above a higher-paying job because of
+commute or fit; commute is the first tie-break only when reliable comparable pay
+is equal. Schedule certainty, short duration, hard requirements, and application
+friction remain visible as diagnostic fit scores and cautions.
+
+The dashboard also shows a separate **door-to-door hourly rate** when both fixed
+shift earnings and the full scheduled span are known:
+
+`fixed shift earnings / (scheduled shift span + 2 x verified one-way commute)`
+
+This is a personal time-efficiency metric, not the advertised wage. It is not
+used as the Pareto pay axis because that chart already uses commute as its other
+axis; using it there would count the same commute penalty twice. Hourly offers
+without a reliable paid duration do not receive an invented shift total or
+door-to-door rate.
 Where the structured salary is only a headline maximum, an employer-detail
 review can override it with the rate applicable to the weekend role; the report
 shows the conversion basis and caution rather than silently comparing unlike

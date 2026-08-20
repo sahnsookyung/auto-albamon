@@ -14,6 +14,7 @@ export function albamonParetoPoints(jobs) {
   const points = [];
   for (const job of jobs || []) {
     if (job?.application_disposition !== "apply") continue;
+    if (job?.pay_comparison_reliable === false) continue;
     const point = albamonPointForJob(job);
     if (!Number.isFinite(point.pay) || point.pay <= 0) continue;
     const { commute } = point;

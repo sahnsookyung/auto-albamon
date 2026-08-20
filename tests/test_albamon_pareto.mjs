@@ -24,6 +24,7 @@ test("chart points mirror the backend Pareto candidate rules", () => {
     job(2, { application_disposition: "do_not_apply" }),
     job(3, { commute_policy_eligible: false }),
     job(4, { comparable_hourly_pay: 0 }),
+    job(6, { comparable_hourly_pay: 50_000, pay_comparison_reliable: false }),
     job(5, {
       remote_job: true,
       transit_minutes: null,

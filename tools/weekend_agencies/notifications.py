@@ -38,6 +38,7 @@ DEFAULT_STATE_PATH = Path(
     "artifacts/weekend-agencies/cache/discord_notifications.json"
 )
 STATE_VERSION = 2
+DIGEST_FORMAT_VERSION = 3
 STATE_RETENTION_DAYS = 30
 DISCORD_WEBHOOK_HOSTS = {
     "discord.com",
@@ -281,6 +282,7 @@ def _notify_report(
             "hotels": {},
             "full_digest": {
                 "fingerprint": digest_fingerprint(hotels),
+                "format_version": DIGEST_FORMAT_VERSION,
                 "sent_pages": 0,
                 "total_pages": len(pages),
                 "complete": False,
@@ -293,10 +295,14 @@ def _notify_report(
     if not digest_state.get("complete"):
         pages = format_complete_digest(report, hotels)
         current_fingerprint = digest_fingerprint(hotels)
-        if digest_state.get("fingerprint") != current_fingerprint:
+        if (
+            digest_state.get("fingerprint") != current_fingerprint
+            or digest_state.get("format_version") != DIGEST_FORMAT_VERSION
+        ):
             digest_state.update(
                 {
                     "fingerprint": current_fingerprint,
+                    "format_version": DIGEST_FORMAT_VERSION,
                     "sent_pages": 0,
                     "total_pages": len(pages),
                     "complete": False,
@@ -341,7 +347,7 @@ def _notify_report(
         elif prior.get("fingerprint") != hotel_fingerprint(hotel):
             candidates.append(("changed", hotel))
 
-    pages = format_update_digest(candidates) if candidates else []
+    pages = format_update_digest(candidates, hotels) if candidates else []
     for page in pages:
         sender(page.message)
         if not dry_run:

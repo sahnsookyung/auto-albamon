@@ -176,7 +176,11 @@ class AlbamonDiscordTests(unittest.TestCase):
             self.assertEqual(1, first_metrics["sent_jobs"])
             self.assertEqual(0, second_metrics["sent_jobs"])
             self.assertEqual(1, len(sent))
+            self.assertTrue(sent[0].startswith("🆕 **새 알바몬 지원 후보 1/1**"))
+            self.assertNotIn("Pareto", sent[0])
             self.assertIn("새 주말 행사 스태프", sent[0])
+            self.assertIn("**알바몬 지원 메시지**", sent[0])
+            self.assertIn("**보내기 전 확인:**", sent[0])
 
     def test_changed_details_on_same_recruit_are_not_a_new_job(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -201,6 +205,44 @@ class AlbamonDiscordTests(unittest.TestCase):
             self.assertEqual(0, metrics["new_jobs"])
             self.assertEqual([], sent)
             self.assertEqual(1, len(json.loads(state_path.read_text())["jobs"]))
+
+    def test_multiple_new_jobs_keep_one_full_detail_message_each(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state_path = Path(directory) / "state.json"
+            notify_new_jobs(
+                {"jobs": [combined_job(1)], "logistics_jobs": []},
+                {"jobs": [unified_job(1)]},
+                state_path=state_path,
+                sender=lambda _message: None,
+            )
+            combined = {"jobs": [combined_job(1)], "logistics_jobs": []}
+            unified = {"jobs": [unified_job(1)]}
+            for recruit_no, title in ((2, "토요일 행사"), (3, "일요일 행사")):
+                job = combined_job(recruit_no, title=title)
+                record = unified_job(recruit_no)
+                record["title"] = title
+                combined["jobs"].append(job)
+                unified["jobs"].append(record)
+            sent: list[str] = []
+
+            metrics = notify_new_jobs(
+                combined,
+                unified,
+                state_path=state_path,
+                sender=sent.append,
+            )
+
+            self.assertEqual(2, metrics["sent_jobs"])
+            self.assertEqual(2, metrics["sent_messages"])
+            self.assertEqual(2, len(sent))
+            self.assertTrue(sent[0].startswith("🆕 **새 알바몬 지원 후보 1/2**"))
+            self.assertTrue(sent[1].startswith("🆕 **새 알바몬 지원 후보 2/2**"))
+            self.assertIn("토요일 행사", sent[0])
+            self.assertIn("일요일 행사", sent[1])
+            self.assertTrue(all("Pareto" not in message for message in sent))
+            self.assertTrue(
+                all("**알바몬 지원 메시지**" in message for message in sent)
+            )
 
     def test_failed_send_does_not_mark_job_as_notified(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -347,6 +389,22 @@ class AlbamonDiscordTests(unittest.TestCase):
                 clear=True,
             ):
                 self.assertEqual(workspace_webhook, resolve_discord_webhook(env_file))
+
+    def test_albamon_resolver_ignores_hotelier_webhook(self):
+        albamon_webhook = "https://discord.com/api/webhooks/123/albamon"
+        hotelier_webhook = "https://discord.com/api/webhooks/456/hotelier"
+        with tempfile.TemporaryDirectory() as directory:
+            env_file = Path(directory) / ".env"
+            env_file.write_text(
+                f"DISCORD_WEBHOOK_URL={albamon_webhook}\n"
+                f"DISCORD_WEBHOOK_URL_HOTELIER={hotelier_webhook}\n",
+                encoding="utf-8",
+            )
+            with patch.dict("os.environ", {}, clear=True):
+                self.assertEqual(
+                    albamon_webhook,
+                    resolve_discord_webhook(env_file),
+                )
 
     def test_webhook_validation_rejects_non_discord_hosts(self):
         with self.assertRaises(ValueError):

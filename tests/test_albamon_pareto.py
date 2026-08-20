@@ -35,6 +35,7 @@ class AlbamonParetoTests(unittest.TestCase):
         records = [
             job(1, 20_000, 10, application_disposition="do_not_apply"),
             job(2, 19_000, None, commute_policy_eligible=False),
+            job(4, 50_000, 5, pay_comparison_reliable=False),
             job(3, 15_000, 20),
         ]
 

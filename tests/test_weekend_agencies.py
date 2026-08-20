@@ -1,5 +1,6 @@
 import json
 import os
+import subprocess
 import tempfile
 import unittest
 from contextlib import nullcontext
@@ -11,7 +12,7 @@ from unittest import mock
 
 from tools import weekend_agency_refresh
 from tools.weekend_agencies.config import SEARCH_DATES
-from tools.weekend_agencies.http import HttpClient
+from tools.weekend_agencies.http import HttpClient, SourceFetchError
 from tools.weekend_agencies.hotel_digest import (
     aggregate_hotels,
     format_complete_digest,
@@ -37,7 +38,7 @@ from tools.weekend_agencies.pareto import (
     pareto_hotel_ids,
 )
 from tools.weekend_agencies.pipeline import PipelineError, default_sources, run_pipeline
-from tools.weekend_agencies.routing import _query_for_offer
+from tools.weekend_agencies.routing import _known_location, _query_for_offer
 from tools.weekend_agencies.sources.eumplus import parse_page as parse_eumplus
 from tools.weekend_agencies.sources.htservice import (
     offer_from_listing as htservice_offer_from_listing,
@@ -163,6 +164,7 @@ class PayParsingTests(unittest.TestCase):
         result = parse_huplux_pay("일급 116,100원", "22:00", "06:00")
         self.assertEqual(14_513, result.actual_hourly_won)
         self.assertEqual("daily", result.pay_frequency)
+        self.assertEqual(116_100, result.advertised_shift_won)
         self.assertTrue(result.warnings)
 
     def test_eumplus_uses_listed_rate_and_validates_weekly_headline(self):
@@ -209,6 +211,7 @@ class PayParsingTests(unittest.TestCase):
         self.assertEqual(12_000, inclusive.actual_hourly_won)
         self.assertEqual(14_400, inclusive.weekly_allowance_hourly_won)
         self.assertEqual(13_300, daily.actual_hourly_won)
+        self.assertEqual(133_000, daily.advertised_shift_won)
 
 
 class SourceParserTests(unittest.TestCase):
@@ -305,6 +308,9 @@ class AggregationTests(unittest.TestCase):
         self.assertEqual("eumplus", groups[0]["best_agency"])
         self.assertEqual(14_000, groups[0]["best_actual_hourly_won"])
         self.assertEqual(2, len(groups[0]["offers"]))
+        option = aggregate_hotels(groups)[0]["job_options"][0]
+        self.assertEqual(2, option["offer_count"])
+        self.assertTrue(option["cross_agency_duplicate"])
 
     def test_equal_cross_agency_pay_is_reported_as_a_tie(self):
         groups = aggregate_offers(
@@ -353,6 +359,16 @@ class AggregationTests(unittest.TestCase):
             "신논현역",
             _query_for_offer(replace(base, station="신논현 4번")),
         )
+
+    def test_ac_hotel_seoul_gangnam_has_a_curated_routing_anchor(self):
+        employer = "에이씨(AC)호텔 바이 메리어트 서울 강남"
+
+        location = _known_location(employer, employer)
+
+        self.assertIsNotNone(location)
+        assert location is not None
+        self.assertAlmostEqual(37.5014, location[0])
+        self.assertAlmostEqual(127.03545, location[1])
 
 
 class HotelParetoTests(unittest.TestCase):
@@ -531,7 +547,9 @@ class PipelineTests(unittest.TestCase):
 
             def fetch(self, _client):
                 if self.broken:
-                    raise TimeoutError("down")
+                    raise SourceFetchError(
+                        "source transport timeout (curl exit 28)", retryable=True
+                    )
                 return [offer("withyou", "good", 12_000)]
 
         def no_network(items, *, api_key):
@@ -564,6 +582,10 @@ class PipelineTests(unittest.TestCase):
             self.assertTrue(first["all_sources_live"])
             self.assertFalse(second["all_sources_live"])
             self.assertEqual("stale_cache", second["sources"]["fixture"]["status"])
+            self.assertEqual(
+                "source transport timeout (curl exit 28)",
+                second["sources"]["fixture"]["failure_reason"],
+            )
             self.assertEqual(
                 kwargs["now"].isoformat(timespec="seconds"),
                 second["sources"]["fixture"]["snapshot_checked_at"],
@@ -788,6 +810,35 @@ class HotelierNotificationTests(unittest.TestCase):
             self.assertEqual(metrics["sent_messages"], len(resumed_messages))
             self.assertTrue(final_state["full_digest"]["complete"])
 
+    def test_incomplete_legacy_digest_layout_restarts_from_first_pareto_page(self):
+        report = self.report_for(offer("withyou", "1", 13_000))
+        observed_at = datetime(2026, 8, 17, tzinfo=ZoneInfo("Asia/Seoul"))
+        with tempfile.TemporaryDirectory() as directory:
+            state_path = Path(directory) / "notifications.json"
+            notify_report(
+                report,
+                state_path=state_path,
+                sender=lambda _message: None,
+                observed_at=observed_at,
+            )
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            state["full_digest"].update(
+                {"complete": False, "sent_pages": 1}
+            )
+            state["full_digest"].pop("format_version", None)
+            state_path.write_text(json.dumps(state), encoding="utf-8")
+            messages: list[str] = []
+
+            metrics = notify_report(
+                report,
+                state_path=state_path,
+                sender=messages.append,
+                observed_at=observed_at + timedelta(minutes=1),
+            )
+
+            self.assertEqual(0, metrics["resumed_from_page"])
+            self.assertTrue(messages[0].startswith("🏆 **호텔 Pareto 추천**"))
+
     def test_new_and_materially_changed_jobs_send_once_and_checkpoint(self):
         initial = self.report_for(offer("withyou", "1", 13_000))
         changed = self.report_for(
@@ -822,6 +873,10 @@ class HotelierNotificationTests(unittest.TestCase):
             self.assertEqual(1, metrics["changed_hotels"])
             self.assertGreaterEqual(metrics["sent_messages"], 1)
             self.assertEqual(metrics["sent_messages"], len(messages))
+            self.assertTrue(
+                messages[0].startswith("🏆 **현재 호텔 Pareto 추천 + 새 변경사항**")
+            )
+            self.assertIn("🆕 새 호텔 1곳 · 변경 1곳", messages[0])
             self.assertEqual(0, repeat["sent_messages"])
 
     def test_message_keeps_actual_and_weekly_allowance_pay_separate(self):
@@ -846,6 +901,7 @@ class HotelierNotificationTests(unittest.TestCase):
         messages = format_complete_digest(report, aggregate_hotels(jobs))
         message = "\n".join(page.message for page in messages)
 
+        self.assertTrue(messages[0].message.startswith("🏆 **호텔 Pareto 추천**"))
         self.assertIn("실제 ₩14,000", message)
         self.assertIn("주휴* 최대 ₩16,800", message)
         self.assertTrue(all(len(page.message) <= 2_000 for page in messages))
@@ -886,16 +942,38 @@ class HotelierNotificationTests(unittest.TestCase):
             for option in hotels[0]["job_options"]
             if option["work_date"] == "2026-08-29" and option["shift"] == "10:00~19:00"
         )
-        self.assertEqual(117_000, daytime["estimated_shift_earnings_won"])
+        self.assertIsNone(daytime["estimated_shift_earnings_won"])
         self.assertEqual(["withyou"], [item["agency"] for item in daytime["provider_offers"]])
+        self.assertEqual(1, daytime["offer_count"])
+        self.assertFalse(daytime["cross_agency_duplicate"])
         self.assertGreater(daytime["total_time_commitment_minutes"], 9 * 60)
-        self.assertLess(daytime["commute_adjusted_hourly_won"], 13_000)
+        self.assertIsNone(daytime["commute_adjusted_hourly_won"])
         self.assertEqual(1, overview.count("JW메리어트 서울"))
         self.assertIn("`10:00~19:00`", details)
         self.assertIn("8/29,8/30", details)
         self.assertIn("`13:00~22:00`", details)
         self.assertIn("₩14,000", details)
         self.assertTrue(all(len(page.message) <= 2_000 for page in pages))
+
+    def test_hotel_door_to_door_rate_requires_advertised_fixed_shift_pay(self):
+        daily_offer = replace(
+            offer("rutine", "daily", 13_000, start="10:00", end="19:00"),
+            pay=PayBreakdown(
+                13_000,
+                None,
+                "일급 117,000원",
+                "derived_from_daily_pay_and_scheduled_hours",
+                pay_frequency="daily",
+                advertised_shift_won=117_000,
+            ),
+        )
+        [hotel] = aggregate_hotels(aggregate_offers([daily_offer]))
+        [option] = hotel["job_options"]
+
+        self.assertEqual(117_000, option["estimated_shift_earnings_won"])
+        self.assertEqual(590, option["total_time_commitment_minutes"])
+        self.assertEqual(11_898, option["commute_adjusted_hourly_won"])
+        self.assertIn("fixed shift pay", option["commute_adjusted_basis"])
 
     def test_integrated_cli_uses_hotelier_notifier_when_requested(self):
         report = {
@@ -998,6 +1076,115 @@ class HttpPacingTests(unittest.TestCase):
             self.assertEqual("ok", client.get(url))
 
         self.assertEqual(105.0, clock.value)
+
+    def test_huplux_retries_transient_failures_with_global_pacing(self):
+        class Clock:
+            value = 100.0
+
+            def monotonic(self):
+                return self.value
+
+            def sleep(self, seconds):
+                self.value += seconds
+
+        clock = Clock()
+        client = HttpClient(monotonic=clock.monotonic, sleeper=clock.sleep)
+        timeout = SourceFetchError(
+            "source transport timeout (curl exit 28)", retryable=True
+        )
+        client._curl_get = mock.Mock(side_effect=[timeout, "ok"])
+        url = "https://www.huplux.com/product/list.php?start_time=2026-08-29"
+
+        with mock.patch("tools.weekend_agencies.http.shutil.which", return_value="curl"):
+            self.assertEqual("ok", client.get(url))
+
+        self.assertEqual(2, client._curl_get.call_count)
+        self.assertEqual(105.0, clock.value)
+
+    def test_huplux_stops_after_three_paced_transient_attempts(self):
+        class Clock:
+            value = 100.0
+
+            def monotonic(self):
+                return self.value
+
+            def sleep(self, seconds):
+                self.value += seconds
+
+        clock = Clock()
+        client = HttpClient(monotonic=clock.monotonic, sleeper=clock.sleep)
+        client._curl_get = mock.Mock(
+            side_effect=SourceFetchError(
+                "source connection failed (curl exit 7)", retryable=True
+            )
+        )
+        url = "https://www.huplux.com/product/list.php?start_time=2026-08-29"
+
+        with (
+            mock.patch("tools.weekend_agencies.http.shutil.which", return_value="curl"),
+            self.assertRaisesRegex(SourceFetchError, "3 paced attempts"),
+        ):
+            client.get(url)
+
+        self.assertEqual(3, client._curl_get.call_count)
+        self.assertEqual(110.0, clock.value)
+
+    def test_huplux_urllib_fallback_uses_the_same_paced_retries(self):
+        class Clock:
+            value = 100.0
+
+            def monotonic(self):
+                return self.value
+
+            def sleep(self, seconds):
+                self.value += seconds
+
+        clock = Clock()
+        client = HttpClient(monotonic=clock.monotonic, sleeper=clock.sleep)
+        timeout = SourceFetchError(
+            "source transport failed via urllib (TimeoutError)", retryable=True
+        )
+        client._urllib_get = mock.Mock(side_effect=[timeout, "ok"])
+        url = "https://www.huplux.com/product/list.php?start_time=2026-08-29"
+
+        with mock.patch("tools.weekend_agencies.http.shutil.which", return_value=None):
+            self.assertEqual("ok", client.get(url))
+
+        self.assertEqual(2, client._urllib_get.call_count)
+        self.assertEqual(105.0, clock.value)
+
+    def test_huplux_does_not_retry_non_transient_failures(self):
+        client = HttpClient()
+        client._curl_get = mock.Mock(
+            side_effect=SourceFetchError("source returned HTTP 404")
+        )
+        url = "https://www.huplux.com/product/list.php?start_time=2026-08-29"
+
+        with (
+            mock.patch("tools.weekend_agencies.http.shutil.which", return_value="curl"),
+            self.assertRaisesRegex(SourceFetchError, "HTTP 404"),
+        ):
+            client.get(url)
+
+        self.assertEqual(1, client._curl_get.call_count)
+
+    def test_curl_timeout_is_safe_and_retryable(self):
+        client = HttpClient()
+        failure = subprocess.CalledProcessError(
+            28,
+            ["curl"],
+            stderr=b"curl: (28) connection timeout",
+        )
+
+        with (
+            mock.patch("tools.weekend_agencies.http.subprocess.run", side_effect=failure),
+            self.assertRaisesRegex(SourceFetchError, "transport timeout") as raised,
+        ):
+            client._curl_get(
+                "curl", "https://www.huplux.com/product/list.php"
+            )
+
+        self.assertTrue(raised.exception.retryable)
 
 
 if __name__ == "__main__":

@@ -11,6 +11,8 @@ def _candidate(record: dict[str, Any]) -> tuple[str, int, int, int] | None:
 
     if record.get("application_disposition") != "apply":
         return None
+    if record.get("pay_comparison_reliable") is False:
+        return None
     try:
         recruit_no = int(record["recruit_no"])
         pay = int(record["comparable_hourly_pay"])

@@ -51,9 +51,9 @@ MESSAGE_CACHE_FIELDS = {
 }
 
 PAY_PRIORITY_MODEL = {
-    "sort_mode": "strict lexicographic: comparable pay descending, then transit minutes ascending",
+    "sort_mode": "strict lexicographic: reliable work-hour pay descending, then transit minutes ascending",
     "ordering": [
-        "comparable hourly compensation",
+        "reliable work-hour equivalent compensation",
         f"public-transit minutes from {TRANSIT_ORIGIN['name']}",
         "schedule certainty, duration, requirements, and application friction",
     ],
@@ -101,7 +101,7 @@ SEOUL_DISTRICT_RE = re.compile(
     r"양천구|영등포구|용산구|은평구|종로구|중구|중랑구)"
 )
 
-# These two headlines are not comparable at their structured salary value. The
+# These headlines are not comparable at their structured salary value. The
 # employer-written detail gives the pay applicable to this weekend applicant.
 PAY_COMPARISON_OVERRIDES: dict[int, dict[str, Any]] = {
     118119949: {
@@ -153,6 +153,17 @@ SEMANTIC_PAY_COMPARISON_OVERRIDES: dict[tuple[str, str], dict[str, Any]] = {
         "㈜밴스마케팅",
         "[평일 1.5 / 주말 1.8] 이태원역 인근 물티슈 배포 알바 구인",
     ): PAY_COMPARISON_OVERRIDES[118257004],
+    (
+        "이음",
+        "[주말 부업] 포토부스 행사 매니저 & 스탭 모집",
+    ): {
+        "hourly_equivalent": 0,
+        "basis": "상세 공고의 150,000원은 개인 일급이 아니라 팀당 총액",
+        "caution": "매니저·스탭이 팀 총액을 협의 분배하므로 개인 보장 시급을 계산할 수 없음",
+        "confidence_penalty": -10,
+        "reliable": False,
+        "shift_earnings_won": None,
+    },
 }
 
 
@@ -660,30 +671,61 @@ def numeric_pay(record: dict[str, Any]) -> int:
     return int(digits) if digits else 0
 
 
+def scheduled_shift_hours(record: dict[str, Any]) -> tuple[float | None, str]:
+    """Return the full scheduled span without guessing an unstated shift."""
+
+    def spans(value: str) -> list[float]:
+        result: list[float] = []
+        for times in re.finditer(
+            r"(\d{1,2}):(\d{2})\s*[~～-]\s*(\d{1,2}):(\d{2})",
+            value,
+        ):
+            start = int(times.group(1)) + int(times.group(2)) / 60
+            end = int(times.group(3)) + int(times.group(4)) / 60
+            if end <= start:
+                end += 24
+            hours = end - start
+            if 0 < hours <= 18:
+                result.append(hours)
+        return result
+
+    work_time_spans = spans(str(record.get("work_time") or ""))
+    if work_time_spans:
+        return max(work_time_spans), "표시 근무시간 전체 구간"
+
+    selectable_spans = [
+        hours
+        for field in ("weekend_shift_options", "late_night_shift_options")
+        for option in (record.get(field) or [])
+        for hours in spans(str(option))
+    ]
+    if selectable_spans:
+        longest = max(selectable_spans)
+        return longest, f"상세 선택 가능 근무조 중 최장 {longest:g}시간 구간"
+    return None, "근무시간 미확인"
+
+
 def comparable_shift_hours(record: dict[str, Any]) -> tuple[float | None, str]:
     """Return conservative paid hours for normalizing a daily/monthly amount."""
 
     title = str(record.get("title") or "")
     option = str(record.get("work_time_option") or "")
-    work_time = str(record.get("work_time") or "")
     explicit = re.search(r"실근로\s*(\d+(?:\.\d+)?)\s*시간", title)
     if explicit:
         return float(explicit.group(1)), "제목에 명시된 실근로시간"
     range_hours = re.search(r"(\d+(?:\.\d+)?)\s*[~～-]\s*(\d+(?:\.\d+)?)\s*시간", option)
     if range_hours:
         return float(range_hours.group(2)), "근무시간 범위의 최대치로 보수적 환산"
-    times = re.search(r"(\d{1,2}):(\d{2})\s*[~～-]\s*(\d{1,2}):(\d{2})", work_time)
-    if not times:
-        return None, "근무시간 미확인"
-    start = int(times.group(1)) + int(times.group(2)) / 60
-    end = int(times.group(3)) + int(times.group(4)) / 60
-    if end <= start:
-        end += 24
-    hours = end - start
+    hours, span_basis = scheduled_shift_hours(record)
+    if hours is None:
+        return None, span_basis
     break_match = re.search(r"휴게시간\s*(\d+)\s*분", option)
     if break_match:
         hours -= int(break_match.group(1)) / 60
-    return max(hours, 0.5), "표시 근무시간에서 휴게시간을 제외"
+        if hours <= 0:
+            return None, "휴게시간이 표시 근무시간 이상이라 환산 불가"
+        return hours, "표시 근무시간에서 명시된 휴게시간을 제외"
+    return hours, f"{span_basis}; 명시된 휴게시간 없음"
 
 
 def comparable_hourly_pay(record: dict[str, Any]) -> dict[str, Any]:
@@ -698,21 +740,38 @@ def comparable_hourly_pay(record: dict[str, Any]) -> dict[str, Any]:
         )
         override = SEMANTIC_PAY_COMPARISON_OVERRIDES.get(semantic_key)
     if override:
-        return dict(override)
+        reviewed = dict(override)
+        reviewed.setdefault("reliable", True)
+        reviewed.setdefault("paid_shift_hours", None)
+        reviewed.setdefault("shift_span_hours", None)
+        reviewed.setdefault("shift_earnings_won", None)
+        return reviewed
     amount = numeric_pay(record)
     salary_type = str(record.get("salary_type") or "")
     hours, hours_basis = comparable_shift_hours(record)
     confidence_penalty = 0
+    reliable = True
+    shift_span_hours, _span_basis = scheduled_shift_hours(record)
+    paid_shift_hours = hours
+    shift_earnings_won: int | None = None
     if salary_type == "시급":
         equivalent = amount
         basis = "공고 시급"
+        paid_duration_verified = bool(
+            hours is not None and "명시된 휴게시간 없음" not in hours_basis
+        )
+        if amount and paid_duration_verified:
+            shift_earnings_won = round(amount * hours)
     elif salary_type == "일급":
         if hours is None:
-            hours = 8.0
-            hours_basis = "근무시간 미확인으로 8시간 가정"
+            equivalent = 0
+            basis = "근무시간 미확인으로 일급 시급환산 제외"
+            reliable = False
             confidence_penalty = -5
-        equivalent = round(amount / hours) if hours else 0
-        basis = f"공고 일급을 {hours:g}시간으로 환산 ({hours_basis})"
+        else:
+            equivalent = round(amount / hours) if amount else 0
+            basis = f"공고 일급을 {hours:g}시간으로 환산 ({hours_basis})"
+        shift_earnings_won = amount or None
     elif salary_type == "월급":
         weekly_hours = re.search(r"주\s*(\d+(?:\.\d+)?)\s*시간", str(record.get("title") or ""))
         if weekly_hours:
@@ -722,23 +781,60 @@ def comparable_hourly_pay(record: dict[str, Any]) -> dict[str, Any]:
             monthly_hours = hours * 2 * 52 / 12
             basis = f"토·일 각 {hours:g}시간을 월환산 ({hours_basis})"
         else:
-            monthly_hours = 209
-            basis = "주간 근무시간 미확인으로 월 209시간 가정"
+            monthly_hours = None
+            basis = "주간 근무시간 미확인으로 월급 시급환산 제외"
+            reliable = False
             confidence_penalty = -5
         equivalent = round(amount / monthly_hours) if monthly_hours else 0
     elif salary_type == "주급":
-        equivalent = round(amount / 40) if amount else 0
-        basis = "주간 근무시간 미확인으로 40시간 가정"
+        equivalent = 0
+        basis = "주간 근무시간 미확인으로 주급 시급환산 제외"
+        reliable = False
         confidence_penalty = -10
     else:
         equivalent = 0
         basis = "비교 가능한 급여 단위 미확인"
+        reliable = False
         confidence_penalty = -10
+    if not amount:
+        reliable = False
     return {
         "hourly_equivalent": max(0, equivalent),
         "basis": basis,
-        "caution": "" if confidence_penalty == 0 else "환산에 필요한 근무시간이 완전히 확인되지 않음",
+        "caution": "" if reliable else "환산에 필요한 근무시간이 확인되지 않아 급여 순위와 Pareto에서 제외",
         "confidence_penalty": confidence_penalty,
+        "reliable": reliable,
+        "paid_shift_hours": paid_shift_hours,
+        "shift_span_hours": shift_span_hours,
+        "shift_earnings_won": shift_earnings_won,
+    }
+
+
+def door_to_door_hourly_pay(
+    record: dict[str, Any], pay: dict[str, Any]
+) -> dict[str, Any]:
+    """Return earnings per scheduled span plus the verified round-trip commute."""
+
+    earnings = pay.get("shift_earnings_won")
+    span_hours = pay.get("shift_span_hours")
+    remote_job = bool(
+        record.get("remote_job")
+        or "remote_short_term" in (record.get("eligibility_lanes") or [])
+    )
+    commute = 0 if remote_job else record.get("transit_minutes")
+    if not isinstance(earnings, int) or earnings <= 0:
+        return {"hourly_equivalent": None, "total_minutes": None, "basis": "교대 총수입 미확인"}
+    if not isinstance(span_hours, (int, float)) or span_hours <= 0:
+        return {"hourly_equivalent": None, "total_minutes": None, "basis": "정확한 근무시간 미확인"}
+    if not isinstance(commute, int) or commute < 0:
+        return {"hourly_equivalent": None, "total_minutes": None, "basis": "왕복 통근시간 미검증"}
+    total_minutes = round(span_hours * 60) + 2 * commute
+    if total_minutes <= 0:
+        return {"hourly_equivalent": None, "total_minutes": None, "basis": "총투입시간 계산 불가"}
+    return {
+        "hourly_equivalent": round(earnings * 60 / total_minutes),
+        "total_minutes": total_minutes,
+        "basis": "교대 총수입 ÷ (전체 근무 구간 + 검증된 왕복 통근)",
     }
 
 
@@ -984,6 +1080,7 @@ def assess_application_priority(
 
     pay = comparable_hourly_pay(record)
     hourly = int(pay["hourly_equivalent"])
+    total_time_pay = door_to_door_hourly_pay(record, pay)
     pay_points = max(0, min(80, round((hourly - 10_320) / 100)))
     minutes = record.get("transit_minutes")
     remote_job = bool(
@@ -1005,8 +1102,13 @@ def assess_application_priority(
         else 0
     )
     fit_points = int(pay.get("confidence_penalty") or 0)
+    pay_reason = (
+        f"{pay_points:+d} 급여 우선점수: 근무 환산시급 약 {hourly:,}원 ({pay['basis']})"
+        if pay.get("reliable")
+        else f"+0 급여 우선점수: {pay['basis']}"
+    )
     reasons = [
-        f"{pay_points:+d} 급여 우선점수: 환산 시급 약 {hourly:,}원 ({pay['basis']})",
+        pay_reason,
         (
             f"{commute_points:+d} 통근 우선점수: 재택근무로 통근 없음"
             if remote_job
@@ -1094,7 +1196,15 @@ def assess_application_priority(
     tier = "A" if score >= 90 else "B" if score >= 75 else "C" if score >= 60 else "D"
     metadata = {
         "comparable_hourly_pay": hourly,
+        "work_hourly_pay": hourly if pay.get("reliable") else None,
+        "pay_comparison_reliable": bool(pay.get("reliable")),
         "pay_comparison_basis": pay["basis"],
+        "estimated_shift_earnings_won": pay.get("shift_earnings_won"),
+        "paid_shift_hours": pay.get("paid_shift_hours"),
+        "shift_span_hours": pay.get("shift_span_hours"),
+        "door_to_door_hourly_pay": total_time_pay["hourly_equivalent"],
+        "total_time_commitment_minutes": total_time_pay["total_minutes"],
+        "door_to_door_pay_basis": total_time_pay["basis"],
         "pay_priority_score": pay_points,
         "commute_priority_score": commute_points,
         "fit_priority_score": fit_points,
@@ -1103,7 +1213,7 @@ def assess_application_priority(
 
 
 def rerank_records(records: list[dict[str, Any]]) -> None:
-    """Sort strictly by comparable pay, using commute as the first tie-break."""
+    """Sort reliable work-hour pay first, using commute as the first tie-break."""
 
     for record in records:
         record["source_utility_rank"] = record.get("utility_rank")
@@ -1116,6 +1226,7 @@ def rerank_records(records: list[dict[str, Any]]) -> None:
         record["utility_cautions"] = cautions
     records.sort(
         key=lambda item: (
+            item.get("pay_comparison_reliable") is not True,
             -item["comparable_hourly_pay"],
             item["transit_minutes"]
             if isinstance(item.get("transit_minutes"), int)
@@ -1626,7 +1737,15 @@ def write_csv(path: Path, records: list[dict[str, Any]]) -> None:
         "utility_tier",
         "utility_score",
         "comparable_hourly_pay",
+        "work_hourly_pay",
+        "pay_comparison_reliable",
         "pay_comparison_basis",
+        "estimated_shift_earnings_won",
+        "paid_shift_hours",
+        "shift_span_hours",
+        "door_to_door_hourly_pay",
+        "total_time_commitment_minutes",
+        "door_to_door_pay_basis",
         "pay_priority_score",
         "commute_priority_score",
         "fit_priority_score",
@@ -1757,9 +1876,19 @@ def write_markdown(path: Path, records: list[dict[str, Any]]) -> None:
                 ]
             )
         for section_rank, record in enumerate(section_records, start=1):
+            work_hourly = (
+                f"근무 환산시급 약 {record['work_hourly_pay']:,}원"
+                if isinstance(record.get("work_hourly_pay"), int)
+                else "근무 환산시급 확인 필요"
+            )
+            total_time_hourly = (
+                f"총투입시간 시급 약 {record['door_to_door_hourly_pay']:,}원"
+                if isinstance(record.get("door_to_door_hourly_pay"), int)
+                else "총투입시간 시급 계산 불가"
+            )
             lines.extend(
                 [
-                    f"### {section_rank}. [{record['company']} — {record['title']}]({record['url']}) — {record['salary_type']} {record['salary']} · 비교 시급 약 {record['comparable_hourly_pay']:,}원 · {record['utility_tier']} / {record['utility_score']}점 (전체 #{record['utility_rank']})",
+                    f"### {section_rank}. [{record['company']} — {record['title']}]({record['url']}) — {record['salary_type']} {record['salary']} · {work_hourly} · {total_time_hourly} · {record['utility_tier']} / {record['utility_score']}점 (전체 #{record['utility_rank']})",
                     "",
                     "**순위 근거**",
                     "",
@@ -1782,7 +1911,8 @@ def write_markdown(path: Path, records: list[dict[str, Any]]) -> None:
                     f"- 급여: {record['salary_type']} {record['salary']}",
                     "- 급여 주의: "
                     + "; ".join(record.get("salary_notes") or ["추가 조건 없음"]),
-                    f"- 급여 비교 기준: 환산 시급 약 {record['comparable_hourly_pay']:,}원 — {record['pay_comparison_basis']}",
+                    f"- 근무 환산시급: {work_hourly} — {record['pay_comparison_basis']}",
+                    f"- 총투입시간 시급: {total_time_hourly} — {record.get('door_to_door_pay_basis') or '계산 근거 없음'}",
                     f"- 근무기간: {record['duration_requirement'] or '숫자 최소기간 미확인'}",
                     f"- 근무 가능 종료일: {record.get('availability_end_date') or '미설정'}",
                     f"- 종료일 적합성: {record.get('availability_compatibility_basis') or '지원 전 확인 필요'}",
