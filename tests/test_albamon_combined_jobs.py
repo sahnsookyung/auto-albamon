@@ -2,6 +2,9 @@ import tempfile
 import unittest
 from datetime import date, datetime
 from pathlib import Path
+from unittest.mock import patch
+
+import tools.albamon_combined_jobs as combined_jobs
 
 from tools.albamon_combined_jobs import (
     annotate_report_with_application_history,
@@ -38,7 +41,7 @@ from tools.albamon_combined_jobs import (
 
 
 class AlbamonCombinedReportTests(unittest.TestCase):
-    def test_temporary_single_day_lane_is_active_only_august_13_and_14(self):
+    def test_temporary_single_day_lane_uses_configured_dates(self):
         record = {
             "target_date_options": ["2026-08-17"],
             "target_district": "송파구",
@@ -53,24 +56,36 @@ class AlbamonCombinedReportTests(unittest.TestCase):
             "clinical_study": False,
         }
 
-        self.assertEqual(
-            [],
-            temporary_single_day_exclusion_reasons(
-                record, as_of=date(2026, 8, 13)
+        with (
+            patch.object(
+                combined_jobs,
+                "TEMPORARY_SINGLE_DAY_ACTIVE_DATES",
+                {date(2026, 8, 13), date(2026, 8, 14)},
             ),
-        )
-        self.assertEqual(
-            [],
-            temporary_single_day_exclusion_reasons(
-                record, as_of=date(2026, 8, 14)
+            patch.object(
+                combined_jobs,
+                "TEMPORARY_SINGLE_DAY_TARGET_DATES",
+                {date(2026, 8, 15), date(2026, 8, 17)},
             ),
-        )
-        self.assertIn(
-            "active only",
-            temporary_single_day_exclusion_reasons(
-                record, as_of=date(2026, 8, 15)
-            )[0],
-        )
+        ):
+            self.assertEqual(
+                [],
+                temporary_single_day_exclusion_reasons(
+                    record, as_of=date(2026, 8, 13)
+                ),
+            )
+            self.assertEqual(
+                [],
+                temporary_single_day_exclusion_reasons(
+                    record, as_of=date(2026, 8, 14)
+                ),
+            )
+            self.assertIn(
+                "active only",
+                temporary_single_day_exclusion_reasons(
+                    record, as_of=date(2026, 8, 15)
+                )[0],
+            )
 
     def test_late_night_lane_can_be_excluded_for_weekend_only_refresh(self):
         args = parse_args(["--exclude-late-night"])
@@ -502,25 +517,37 @@ class AlbamonCombinedReportTests(unittest.TestCase):
             "duration_requirement": "No one-month minimum found",
         }
 
-        self.assertEqual([], late_night_exclusion_reasons(record))
+        availability_end = date(2026, 9, 9)
+        self.assertEqual(
+            [],
+            late_night_exclusion_reasons(
+                record, as_of=date(2026, 8, 17), availability_end=availability_end
+            ),
+        )
         for district in ("강남구", "서초구", "송파구"):
             with self.subTest(district=district):
                 self.assertEqual(
                     [],
                     late_night_exclusion_reasons(
-                        {**record, "target_district": district}
+                        {**record, "target_district": district},
+                        as_of=date(2026, 8, 17),
+                        availability_end=availability_end,
                     ),
                 )
         self.assertIn(
-            "outside the Gangnam-Seocho-Songpa corridor",
+            "outside the configured evening corridor",
             late_night_exclusion_reasons(
-                {**record, "target_district": "광진구"}
+                {**record, "target_district": "광진구"},
+                as_of=date(2026, 8, 17),
+                availability_end=availability_end,
             )[0],
         )
         self.assertIn(
             "no advertised shift",
             late_night_exclusion_reasons(
-                {**record, "late_night_compatible": False}
+                {**record, "late_night_compatible": False},
+                as_of=date(2026, 8, 17),
+                availability_end=availability_end,
             )[0],
         )
         self.assertIn(

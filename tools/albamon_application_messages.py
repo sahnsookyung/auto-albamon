@@ -24,20 +24,20 @@ try:
         ORIGIN as TRANSIT_ORIGIN,
         cache_origin_matches,
     )
+    from tools.jobscout_config import SETTINGS, load_applicant_profile
 except ModuleNotFoundError:  # Support direct execution from the repository root.
     from albamon_runtime import atomic_text_writer, atomic_write_text
     from albamon_transit import ORIGIN as TRANSIT_ORIGIN, cache_origin_matches
+    from jobscout_config import SETTINGS, load_applicant_profile
 
 
-DEFAULT_INPUT = Path(
-    "artifacts/albamon/2026-08-01-combined-matched-summer-urgent.json"
-)
-DEFAULT_OUTPUT_PREFIX = Path("artifacts/albamon/2026-08-01-application-messages")
+DEFAULT_INPUT = Path("artifacts/albamon/latest-combined.json")
+DEFAULT_OUTPUT_PREFIX = Path("artifacts/albamon/latest-unified-report")
 DEFAULT_DISPOSITIONS = Path("tools/albamon_application_dispositions.json")
 DEFAULT_TRANSIT_CACHE = Path("tools/albamon_transit_cache.json")
 DEFAULT_MESSAGE_CACHE = Path("artifacts/albamon/cache/application_messages.json")
-TRANSIT_CUTOFF_MINUTES = 50
-MESSAGE_RULESET_VERSION = 7
+TRANSIT_CUTOFF_MINUTES = SETTINGS.commute.base_limit_minutes
+MESSAGE_RULESET_VERSION = 8
 MESSAGE_CACHE_FIELDS = {
     "message",
     "message_origin",
@@ -57,42 +57,54 @@ PAY_PRIORITY_MODEL = {
         f"public-transit minutes from {TRANSIT_ORIGIN['name']}",
         "schedule certainty, duration, requirements, and application friction",
     ],
-    "pay_points": "0-80; one point per KRW 100 above KRW 10,320/hour",
+    "pay_points": (
+        "0-80; one point per KRW 100 above "
+        f"KRW {SETTINGS.ranking.pay_score_baseline_hourly_won:,}/hour"
+    ),
     "commute_points": "0-20; scaled across routes admitted by the applicable commute policy",
     "commute_eligibility": (
-        "a conservative 20-minute walking-radius estimate from one of six preferred "
-        "stations for weekday evening-only jobs; otherwise 50 minutes inclusive "
-        "from home in Seoul, with pay-dependent extensions "
-        "up to 90 minutes only in Yongsan and Yeongdeungpo"
+        f"a conservative {SETTINGS.albamon.evening.station_walk_limit_minutes}-minute "
+        f"walking-radius estimate from one of {len(SETTINGS.albamon.evening.stations)} "
+        "configured stations for weekday evening-only jobs; otherwise "
+        f"{SETTINGS.commute.base_limit_minutes} minutes inclusive from the configured "
+        f"origin, with pay-dependent extensions up to "
+        f"{SETTINGS.commute.premium_extension.maximum_minutes} minutes only in "
+        f"{', '.join(SETTINGS.commute.premium_extension.districts)}"
     ),
-    "tier_thresholds": {"A": 90, "B": 75, "C": 60, "D": 0},
+    "tier_thresholds": dict(
+        zip(
+            ("A", "B", "C"),
+            SETTINGS.ranking.application_tier_minimums,
+            strict=True,
+        )
+    )
+    | {"D": 0},
 }
 
-BASE_COMMUTE_LIMIT_MINUTES = 50
-EVENING_STATION_AREA_LIMIT_MINUTES = 20
-EVENING_WALK_SPEED_KMH = 4.8
-EVENING_WALK_ROUTE_FACTOR = 1.2
-EVENING_STATION_COORDINATES = {
-    "역삼역": (37.500658, 127.036430),
-    "강남역": (37.497952, 127.027619),
-    "송파역": (37.499703, 127.112183),
-    "잠실역": (37.513305, 127.100129),
-    "잠실새내역": (37.511687, 127.086162),
-    "삼성역": (37.508844, 127.063160),
-}
-PREMIUM_COMMUTE_MAX_MINUTES = 90
-PREMIUM_FIRST_TIER_PAY_WON = 12_000
-PREMIUM_FIRST_TIER_MAX_PAY_WON = 15_000
-PREMIUM_FIRST_TIER_MAX_MINUTES = 80
-PREMIUM_FIRST_TIER_WON_PER_MINUTE = 100
-PREMIUM_SECOND_TIER_MAX_PAY_WON = 18_000
-PREMIUM_SECOND_TIER_WON_PER_MINUTE = 300
+BASE_COMMUTE_LIMIT_MINUTES = SETTINGS.commute.base_limit_minutes
+EVENING_STATION_AREA_LIMIT_MINUTES = (
+    SETTINGS.albamon.evening.station_walk_limit_minutes
+)
+EVENING_WALK_SPEED_KMH = SETTINGS.albamon.evening.walk_speed_kmh
+EVENING_WALK_ROUTE_FACTOR = SETTINGS.albamon.evening.walk_route_factor
+EVENING_STATION_COORDINATES = dict(SETTINGS.albamon.evening.station_coordinates)
+_PREMIUM = SETTINGS.commute.premium_extension
+PREMIUM_COMMUTE_MAX_MINUTES = _PREMIUM.maximum_minutes
+PREMIUM_FIRST_TIER_PAY_WON = _PREMIUM.first_tier_minimum_pay_won
+PREMIUM_FIRST_TIER_MAX_PAY_WON = _PREMIUM.first_tier_maximum_pay_won
+PREMIUM_FIRST_TIER_MAX_MINUTES = _PREMIUM.first_tier_maximum_minutes
+PREMIUM_FIRST_TIER_WON_PER_MINUTE = _PREMIUM.first_tier_won_per_minute
+PREMIUM_SECOND_TIER_MAX_PAY_WON = _PREMIUM.second_tier_maximum_pay_won
+PREMIUM_SECOND_TIER_WON_PER_MINUTE = _PREMIUM.second_tier_won_per_minute
 SEARCH_ZONE_LABELS = {
     "remote": "Remote · 재택",
-    "core": "Core · 강남/송파",
-    "seocho_corridor": "서초 · 방배/내방/반포/교대",
-    "east_near_core": "East near-core · 강동/성동/광진",
-    "premium_stretch": "Premium stretch · 용산/영등포",
+    "core": "Core · " + "/".join(SETTINGS.ranking.core_districts),
+    "seocho_corridor": "Corridor · "
+    + "/".join(SETTINGS.ranking.corridor_districts),
+    "east_near_core": "Near-core · "
+    + "/".join(SETTINGS.ranking.near_core_districts),
+    "premium_stretch": "Premium stretch · "
+    + "/".join(SETTINGS.commute.premium_extension.districts),
     "outer_seoul": "Outer Seoul",
 }
 SEOUL_DISTRICT_RE = re.compile(
@@ -169,7 +181,7 @@ SEMANTIC_PAY_COMPARISON_OVERRIDES: dict[tuple[str, str], dict[str, Any]] = {
 
 # Deliberately excludes the applicant's name, phone number, email, exact address,
 # birth date, and profile/resume identifier.
-PROFILE_FACTS: dict[str, dict[str, str]] = {}
+PROFILE_FACTS: dict[str, dict[str, str]] = load_applicant_profile()
 
 
 def spec(
@@ -199,8 +211,7 @@ def spec(
     }
 
 
-REGULAR_SPECS = {}
-
+REGULAR_SPECS: dict[int, dict[str, Any]] = {}
 
 BMART_REQUIREMENTS = [
     "냉장·냉동 상품을 다루는 저온 환경 근무 가능 여부",
@@ -234,14 +245,14 @@ ROLE_PRIORITIES: dict[str, list[str]] = {
 
 FACT_RELEVANCE = {
     "restaurant": "음식점 경험을 위생·현장 적응과 연결",
-    "hall_service": "[REMOVED_PRIVATE_PROFILE_7f43392d5e]을 고객 응대·서빙과 직접 연결",
-    "health_certificate": "식품 취급 업무에 필요한 [REMOVED_PRIVATE_PROFILE_5d2d7223f1] 사실 사용",
+    "hall_service": "고객 응대·서비스 경험을 관련 현장 업무와 연결",
+    "health_certificate": "식품 취급 자격·서류 사실을 관련 업무에만 사용",
     "events": "행사 운영 경험을 안내·동선·현장 대응과 연결",
     "english": "공고의 외국어 신호에만 영어 능력을 사용",
     "computer_excel": "전산·자료 업무에만 컴퓨터·엑셀 경험을 사용",
     "software": "정확한 데이터 처리나 기술 업무에만 개발 경력을 사용",
     "work_style": "공고가 요구하는 시간 준수·책임감에 연결",
-    "jamsil": "인근 거주 또는 송파권 출퇴근 안정성과 연결",
+    "local_area": "지원자가 직접 설정한 인근 거주 사실을 출퇴근 안정성과 연결",
 }
 
 
@@ -371,99 +382,55 @@ def role_spec(job: dict[str, Any]) -> tuple[str, list[str]]:
     role = classify_role(job)
     priorities = employer_priorities(job, role)
     duty_text = "·".join(priorities[:3])
-    if role == "cleaning":
-        pitch = (
-            "음식점 근무에서 위생과 정리정돈을 지키며 일했습니다. "
-            "정해진 청소 구역과 순서를 누락 없이 확인하고, 이용객 동선을 방해하지 않도록 "
-            f"{duty_text} 업무를 꼼꼼하게 마무리하겠습니다."
+    company = str(job.get("company") or "해당 업체")
+    title = str(job.get("title") or "모집 업무")
+    role_fact_candidates = {
+        "cleaning": ("restaurant", "work_style"),
+        "media_extra": ("work_style",),
+        "child_education": ("events", "work_style"),
+        "leaflet": ("events", "work_style"),
+        "security_safety": ("events", "work_style"),
+        "event": ("events", "work_style"),
+        "hall_service": ("restaurant", "hall_service", "work_style"),
+        "kitchen": ("restaurant", "health_certificate", "work_style"),
+        "cafe_bakery": (
+            "restaurant", "hall_service", "health_certificate", "work_style"
+        ),
+        "food_service": (
+            "restaurant", "hall_service", "health_certificate", "work_style"
+        ),
+        "retail": ("events", "work_style"),
+        "front_desk": ("events", "work_style"),
+        "office": ("software", "computer_excel", "work_style"),
+        "general": ("work_style",),
+    }
+    facts = [
+        key for key in role_fact_candidates.get(role, ("work_style",))
+        if key in PROFILE_FACTS
+    ]
+    verified_context = ""
+    if facts:
+        verified_context = (
+            "확인된 관련 강점은 "
+            + ", ".join(PROFILE_FACTS[key]["fact"] for key in facts)
+            + "입니다. "
         )
-        facts = ["restaurant", "work_style"]
-    elif role == "media_extra":
-        pitch = (
-            "시간 약속과 현장 지시를 정확히 지키는 편입니다. 촬영 전 안내되는 집합시간과 "
-            "복장을 미리 확인하고, 대기·이동·반복 촬영 지시에 맞춰 현장 흐름을 방해하지 않겠습니다."
-        )
-        facts = ["work_style"]
-    elif role == "child_education":
-        pitch = (
-            "행사에서 방문객에게 프로그램과 이용 순서를 알기 쉽게 안내한 경험이 있습니다. "
-            f"{duty_text}를 먼저 숙지하고, 어린이가 안전하게 참여하도록 차분히 설명하고 확인하겠습니다."
-        )
-        facts = ["events", "work_style"]
-    elif role == "leaflet":
-        pitch = (
-            "행사 운영 중 낯선 방문객에게 먼저 밝게 안내하고 현장 상황을 공유해 왔습니다. "
-            "지정된 배포 위치와 수량을 지키고, 중복·누락 없이 진행 상황을 정확히 보고하겠습니다."
-        )
-        facts = ["events", "work_style"]
-    elif role == "security_safety":
-        pitch = (
-            "행사 방문객 안내 경험이 있어 혼잡한 상황에서도 짧고 분명하게 동선을 설명할 수 있습니다. "
-            f"{duty_text} 기준을 먼저 숙지하고, 이상 상황은 임의로 넘기지 않고 즉시 공유하겠습니다."
-        )
-        facts = ["events", "work_style"]
-    elif role == "event":
-        pitch = (
-            "국제 행사 부스 운영과 방문객 안내 경험이 있어 현장 안내, 문의 응대와 동선 정리에 익숙합니다. "
-            f"행사 전에 {duty_text} 절차를 숙지하고, 방문객에게 같은 내용을 일관되고 정확하게 전달하겠습니다."
-        )
-        facts = ["events", "work_style"]
-    elif role == "hall_service":
-        pitch = (
-            "[REMOVED_PRIVATE_PROFILE_7f43392d5e]으로 주문 확인, 서빙, 테이블 정리와 피크타임 협업에 익숙합니다. "
-            f"{duty_text} 순서를 빠르게 파악하고, 요청을 놓치지 않도록 테이블과 홀 상황을 계속 확인하겠습니다."
-        )
-        facts = ["restaurant", "hall_service", "work_style"]
-    elif role == "kitchen":
-        pitch = (
-            "[REMOVED_PRIVATE_PROFILE_8f8253601a]이 있고 보건증도 보유하고 있습니다. "
-            f"{duty_text}의 작업 순서와 위생 기준을 먼저 익혀, 바쁜 시간에도 조리 동선이 막히지 않게 보조하겠습니다."
-        )
-        facts = ["restaurant", "health_certificate", "work_style"]
-    elif role == "cafe_bakery":
-        pitch = (
-            "음식점과 [REMOVED_PRIVATE_PROFILE_7f43392d5e]으로 고객 응대, 위생 관리와 마감 정리에 익숙하며 보건증도 보유하고 있습니다. "
-            f"{duty_text}의 매장별 순서와 레시피를 정확히 익혀, 배운 업무부터 정확하고 안정적으로 수행하겠습니다."
-        )
-        facts = ["restaurant", "hall_service", "health_certificate", "work_style"]
-    elif role == "food_service":
-        pitch = (
-            "음식점 아르바이트와 [REMOVED_PRIVATE_PROFILE_7f43392d5e]이 있고 보건증도 보유하고 있습니다. "
-            f"{duty_text}의 순서를 빠르게 익히고, 주문과 식품 위생을 함께 확인하며 피크타임 흐름에 맞춰 움직이겠습니다."
-        )
-        facts = ["restaurant", "hall_service", "health_certificate", "work_style"]
-    elif role == "retail":
-        pitch = (
-            "행사 부스에서 방문객을 응대하고 필요한 정보를 정확히 안내한 경험이 있습니다. "
-            f"{duty_text} 기준을 먼저 익히고, 고객 문의에는 확인된 상품 정보로 정확하게 안내하겠습니다."
-        )
-        facts = ["events", "work_style"]
-    elif role == "front_desk":
-        pitch = (
-            "행사 운영과 방문객 안내 경험으로 처음 오는 분의 문의를 듣고 필요한 위치와 절차를 설명해 왔습니다. "
-            f"{duty_text} 기준을 숙지하고, 시설 이상이나 인계 사항을 빠뜨리지 않고 기록·공유하겠습니다."
-        )
-        facts = ["events", "work_style"]
-    elif role == "office":
-        pitch = (
-            "컴퓨터·엑셀·코딩 업무 경험이 있어 자료를 구조적으로 정리하고 오류를 확인하는 데 익숙합니다. "
-            f"{duty_text} 절차와 파일 규칙을 먼저 확인하고, 처리 결과를 다시 대조해 정확하게 마무리하겠습니다."
-        )
-        facts = ["software", "computer_excel", "work_style"]
-    else:
-        pitch = (
-            "시간 약속과 맡은 업무의 마무리를 중요하게 생각합니다. "
-            f"{duty_text}의 기준과 보고 순서를 먼저 확인하고, 불명확한 부분은 바로 질문해 정확히 수행하겠습니다."
-        )
-        facts = ["work_style"]
-
+    task_label = "청소 구역과 작업 순서" if role == "cleaning" else f"{duty_text}의 기준과 작업 순서"
+    pitch = (
+        verified_context
+        + f"{company}의 ‘{title}’ 업무에서는 {task_label}를 먼저 확인하고, "
+        "불명확한 부분은 바로 질문하며 진행 상황을 공유하고 완료 결과를 다시 점검하겠습니다."
+    )
     text = job_text(job)
-    if any(token in text for token in ("외국어", "영어", "통역", "외국인 고객")):
-        pitch += " 영어는 원어민 수준이라 외국인 고객 문의도 정확하게 응대할 수 있습니다."
+    if (
+        "english" in PROFILE_FACTS
+        and any(token in text for token in ("외국어", "영어", "통역", "외국인 고객"))
+    ):
+        pitch += f" {PROFILE_FACTS['english']['fact']}을 바탕으로 외국인 문의도 정확히 확인하겠습니다."
         facts.append("english")
-    if "인근 거주" in text and job.get("target_district") == "송파구":
-        pitch += " [REMOVED_PRIVATE_PROFILE_2e9ee7e3fd]라 송파권 출퇴근도 안정적입니다."
-        facts.append("jamsil")
+    if "local_area" in PROFILE_FACTS and "인근 거주" in text:
+        pitch += f" {PROFILE_FACTS['local_area']['fact']}도 지원 조건과 일치합니다."
+        facts.append("local_area")
     return pitch, facts
 
 
@@ -506,7 +473,7 @@ def requirements_for_message(job: dict[str, Any], role: str) -> tuple[list[str],
             verify.append("지정 복장 준비 가능 여부")
             optional = "공고의 지정 복장도 준비 가능합니다."
             unsatisfied.append("지정 복장 준비")
-        elif "relevant experience" in lowered:
+        elif "experience" in lowered or "경력" in requirement:
             verify.append(f"필수 경력 충족 여부: {requirement}")
             unsatisfied.append("공고가 요구하는 관련 실무 경력")
         else:
@@ -526,20 +493,35 @@ def requirements_for_message(job: dict[str, Any], role: str) -> tuple[list[str],
 
 
 def known_profile_mismatch(job: dict[str, Any], role: str) -> str:
-    """Return a verified applicant mismatch that should not remain actionable."""
+    """Fail closed when a mandatory qualification is absent from the profile."""
 
     title = str(job.get("title") or "")
     experience_only = bool(
         re.search(r"경력(?:자|직)\s*(?:만|지원\s*요망|필수)", title)
     )
-    if experience_only and role == "cafe_bakery":
-        return "공고가 카페 경력자만 요구하지만 현재 확인된 카페 실무 경력이 없음"
-    if experience_only and role == "front_desk":
-        return "공고가 관련 경력자만 요구하지만 현재 확인된 해당 실무 경력이 없음"
-    if "Powerboat/yacht/deck-officer licence" in (
-        job.get("certificate_requirements") or []
+    if experience_only and role == "cafe_bakery" and "cafe_experience" not in PROFILE_FACTS:
+        return "공고 필수 카페 경력이 설정된 지원자 프로필에서 확인되지 않음"
+    if experience_only and role == "front_desk" and "front_desk_experience" not in PROFILE_FACTS:
+        return "공고 필수 프런트 경력이 설정된 지원자 프로필에서 확인되지 않음"
+    if (
+        "Powerboat/yacht/deck-officer licence"
+        in (job.get("certificate_requirements") or [])
+        and "marine_license" not in PROFILE_FACTS
     ):
-        return "공고 필수인 동력수상레저 1급·요트·6급 항해사 자격증 보유 사실이 확인되지 않음"
+        return "공고 필수 수상레저·항해 자격이 설정된 지원자 프로필에서 확인되지 않음"
+    hard_requirements = " ".join(str(value) for value in job.get("hard_requirements") or [])
+    if (
+        ("Health certificate" in hard_requirements or "보건증" in hard_requirements)
+        and "health_certificate" not in PROFILE_FACTS
+    ):
+        return "공고 필수 보건증이 설정된 지원자 프로필에서 확인되지 않음"
+    if "Chinese proficiency" in hard_requirements and "chinese" not in PROFILE_FACTS:
+        return "공고 필수 중국어 능력이 설정된 지원자 프로필에서 확인되지 않음"
+    if (
+        ("English" in hard_requirements or "영어" in hard_requirements)
+        and "english" not in PROFILE_FACTS
+    ):
+        return "공고 필수 영어 능력이 설정된 지원자 프로필에서 확인되지 않음"
     return ""
 
 
@@ -548,17 +530,18 @@ def bmart_spec(job: dict[str, Any]) -> dict[str, Any]:
 
     company = str(job["company"])
     branch = company.removeprefix("배민B마트 ").strip() or company
-    local_sentence = ""
-    facts = ["work_style"]
-    if job.get("target_district") == "송파구":
-        local_sentence = " [REMOVED_PRIVATE_PROFILE_2e9ee7e3fd]로 송파권 출퇴근도 안정적입니다."
-        facts.append("jamsil")
+    facts = [key for key in ("work_style",) if key in PROFILE_FACTS]
+    verified_context = (
+        f"{PROFILE_FACTS['work_style']['fact']}을 바탕으로 "
+        if "work_style" in PROFILE_FACTS
+        else ""
+    )
     return spec(
         f"{company} 단기 일일크루",
-        "시간 준수와 맡은 업무의 마무리를 중요하게 생각합니다. "
+        verified_context
+        +
         f"{branch}에서 상품 코드·수량·보관 구역을 대조해 피킹·포장 오류를 줄이고, "
-        "완료한 재고는 다음 작업자가 바로 확인할 수 있게 정리하겠습니다."
-        + local_sentence,
+        "완료한 재고는 다음 작업자가 바로 확인할 수 있게 정리하겠습니다.",
         facts,
         verify=BMART_REQUIREMENTS,
         optional_sentence="저온 환경 근무와 반복적인 재고 운반이 가능하며, 본인 명의 급여 계좌도 보유하고 있습니다.",
@@ -575,7 +558,7 @@ def coupang_spec(job: dict[str, Any]) -> dict[str, Any]:
     return spec(
         "쿠팡 주말 단순 소분·피킹 스태프",
         "시간과 안전수칙을 정확히 지키고 맡은 구역을 끝까지 마무리하겠습니다. 상품 구분표와 수량을 먼저 확인한 뒤 소분·피킹하고, 파손이나 수량 차이가 있으면 임의 처리하지 않고 바로 보고하겠습니다.",
-        ["work_style"],
+        [key for key in ("work_style",) if key in PROFILE_FACTS],
         verify=["실제 물류센터 주소", "송파 집결지에서 출발하는 셔틀 노선·시간", "원하는 주말 날짜와 실제 근무시간", "중량물 취급 범위"],
         fit_warning="공고의 송파구 표기는 실제 센터가 아니라 셔틀·집결지일 수 있으므로 센터 주소 확인이 필수입니다.",
         role_family="logistics",
@@ -856,13 +839,13 @@ def classify_search_zone(record: dict[str, Any]) -> tuple[str, str]:
     match = SEOUL_DISTRICT_RE.search(location_text)
     if match:
         district = match.group(1)
-    if district in {"강남구", "송파구"}:
+    if district in set(SETTINGS.ranking.core_districts):
         zone = "core"
-    elif district == "서초구":
+    elif district in set(SETTINGS.ranking.corridor_districts):
         zone = "seocho_corridor"
-    elif district in {"강동구", "성동구", "광진구"}:
+    elif district in set(SETTINGS.ranking.near_core_districts):
         zone = "east_near_core"
-    elif district in {"용산구", "영등포구"}:
+    elif district in set(_PREMIUM.districts):
         zone = "premium_stretch"
     else:
         zone = "outer_seoul"
@@ -1027,10 +1010,13 @@ def commute_policy_for_job(
         and limit > BASE_COMMUTE_LIMIT_MINUTES
     )
     if evening_only:
+        station_names = "·".join(
+            station.removesuffix("역") for station in SETTINGS.albamon.evening.stations
+        )
         policy_reason = (
             "Evening station-area rule: estimated walk up to "
-            f"{EVENING_STATION_AREA_LIMIT_MINUTES} min from 역삼·강남·송파·잠실·"
-            f"잠실새내·삼성, plus home commute up to {limit} min"
+            f"{EVENING_STATION_AREA_LIMIT_MINUTES} min from {station_names}, "
+            f"plus origin commute up to {limit} min"
         )
     elif zone == "premium_stretch" and limit > BASE_COMMUTE_LIMIT_MINUTES:
         policy_reason = (
@@ -1043,7 +1029,7 @@ def commute_policy_for_job(
     if station_area_excluded:
         if station_proximity["evening_station_area_status"] == "unverified":
             exclusion_reason = (
-                "선호 역세권 20분 범위를 검증할 근무지 좌표가 없어 WebUI 확인 필요"
+                "선호 역세권 도보 범위를 검증할 근무지 좌표가 없어 WebUI 확인 필요"
             )
         else:
             exclusion_reason = (
@@ -1081,7 +1067,15 @@ def assess_application_priority(
     pay = comparable_hourly_pay(record)
     hourly = int(pay["hourly_equivalent"])
     total_time_pay = door_to_door_hourly_pay(record, pay)
-    pay_points = max(0, min(80, round((hourly - 10_320) / 100)))
+    pay_points = max(
+        0,
+        min(
+            80,
+            round(
+                (hourly - SETTINGS.ranking.pay_score_baseline_hourly_won) / 100
+            ),
+        ),
+    )
     minutes = record.get("transit_minutes")
     remote_job = bool(
         record.get("remote_job")
@@ -1137,10 +1131,18 @@ def assess_application_priority(
         "songpa_late_night" in eligibility_lanes
         and "weekend_short_term" not in eligibility_lanes
     ):
-        fit_adjust(4, "역삼·강남·송파·잠실·잠실새내·삼성권 19:00~02:00 근무조 명시")
-        cautions.append("02:00 퇴근 시 귀가 교통수단 별도 확인 필요")
+        fit_adjust(
+            4,
+            f"{'·'.join(SETTINGS.albamon.evening.stations)}권 "
+            f"{SETTINGS.albamon.evening.available_from}~"
+            f"{SETTINGS.albamon.evening.available_until} 근무조 명시",
+        )
+        cautions.append(
+            f"{SETTINGS.albamon.evening.available_until} 퇴근 시 "
+            "귀가 교통수단 별도 확인 필요"
+        )
     elif (
-        "aug_15_17_single_day" in eligibility_lanes
+        bool({"temporary_single_day", "aug_15_17_single_day"} & eligibility_lanes)
         and "weekend_short_term" not in eligibility_lanes
     ):
         dates = ", ".join(record.get("target_date_options") or [])
@@ -1172,11 +1174,23 @@ def assess_application_priority(
     for requirement in requirements:
         normalized = requirement.lower()
         if "health certificate" in normalized or "보건증" in requirement:
-            fit_adjust(1, "보건증 요건 충족")
+            fit_adjust(
+                1 if "health_certificate" in PROFILE_FACTS else -6,
+                "보건증 요건 충족" if "health_certificate" in PROFILE_FACTS else "보건증 요건 확인 필요",
+                caution="health_certificate" not in PROFILE_FACTS,
+            )
         elif "chinese" in normalized or "중국어" in requirement:
-            fit_adjust(-12, "중국어 하드 요건 미충족", caution=True)
+            fit_adjust(
+                2 if "chinese" in PROFILE_FACTS else -12,
+                "중국어 요건 충족" if "chinese" in PROFILE_FACTS else "중국어 하드 요건 미확인",
+                caution="chinese" not in PROFILE_FACTS,
+            )
         elif "english" in normalized or "영어" in requirement:
-            fit_adjust(2, "영어 요건 충족")
+            fit_adjust(
+                2 if "english" in PROFILE_FACTS else -8,
+                "영어 요건 충족" if "english" in PROFILE_FACTS else "영어 하드 요건 미확인",
+                caution="english" not in PROFILE_FACTS,
+            )
         elif "experience" in normalized or "경력" in requirement:
             fit_adjust(-6, "관련 실무 경력 필수", caution=True)
         elif "refrigerated/frozen" in normalized:
@@ -1193,7 +1207,8 @@ def assess_application_priority(
         fit_adjust(-2, "외부 홈페이지 지원", caution=True)
 
     score = pay_points + commute_points + fit_points
-    tier = "A" if score >= 90 else "B" if score >= 75 else "C" if score >= 60 else "D"
+    tier_a, tier_b, tier_c = SETTINGS.ranking.application_tier_minimums
+    tier = "A" if score >= tier_a else "B" if score >= tier_b else "C" if score >= tier_c else "D"
     metadata = {
         "comparable_hourly_pay": hourly,
         "work_hourly_pay": hourly if pay.get("reliable") else None,
@@ -1267,6 +1282,7 @@ def application_message_fingerprint(job: dict[str, Any]) -> str:
     )
     payload = {
         "ruleset": MESSAGE_RULESET_VERSION,
+        "profile": PROFILE_FACTS,
         "job": {field: job.get(field) for field in fields},
     }
     encoded = json.dumps(
@@ -1389,8 +1405,16 @@ def build_records(
                 if key in FACT_RELEVANCE
             )
             profile_mismatch = known_profile_mismatch(job, role_family)
-            if profile_mismatch and not item["fit_warning"]:
-                item = {**item, "fit_warning": profile_mismatch}
+            if profile_mismatch:
+                existing_warning = str(item.get("fit_warning") or "").strip()
+                item = {
+                    **item,
+                    "fit_warning": " · ".join(
+                        value
+                        for value in (profile_mismatch, existing_warning)
+                        if value
+                    ),
+                }
             message_fields = {
                 "message": compose_message(item),
                 "message_origin": message_origin,
@@ -1398,7 +1422,9 @@ def build_records(
                 "employer_priorities": priorities,
                 "relevance_rationale": relevance,
                 "profile_facts_used": [
-                    PROFILE_FACTS[key]["fact"] for key in item["facts"]
+                    PROFILE_FACTS[key]["fact"]
+                    for key in item["facts"]
+                    if key in PROFILE_FACTS
                 ],
                 "verify_before_sending": item["verify"],
                 "optional_sentence_if_true": item["optional_sentence"],
@@ -1818,10 +1844,11 @@ def write_csv(path: Path, records: list[dict[str, Any]]) -> None:
 
 
 def write_markdown(path: Path, records: list[dict[str, Any]]) -> None:
+    premium_districts = "·".join(_PREMIUM.districts)
     lines = [
         "# 알바몬 통합 지원 보고서",
         "",
-        f"> 환산 시급이 높은 순으로 먼저 정렬하고, 같은 급여에서는 {TRANSIT_ORIGIN['name']} 대중교통 시간이 짧은 순으로 정렬했습니다. 기본 기준은 50분 이하이며 용산·영등포만 확정 급여에 따라 최대 90분까지 연장합니다. `보내기 전 확인`을 확인한 뒤 메시지를 사용하세요.",
+        f"> 실제 근무시간 기준 시급이 높은 순으로 먼저 정렬하고, 같은 급여에서는 {TRANSIT_ORIGIN['name']} 대중교통 시간이 짧은 순으로 정렬했습니다. 기본 기준은 {BASE_COMMUTE_LIMIT_MINUTES}분 이하이며 {premium_districts}만 확정 급여에 따라 최대 {PREMIUM_COMMUTE_MAX_MINUTES}분까지 연장합니다. `보내기 전 확인`을 확인한 뒤 메시지를 사용하세요.",
         "",
         "## 사용한 지원자 강점",
         "",
@@ -1904,9 +1931,10 @@ def write_markdown(path: Path, records: list[dict[str, Any]]) -> None:
                     f"- 일정: {record['work_days']}; {record['work_time']}",
                     "- 상세 주말 슬롯: "
                     + "; ".join(record.get("weekend_shift_options") or ["별도 슬롯 없음"]),
-                    "- 8/15·8/17 1일 선택지: "
+                    "- 설정된 1일 선택지: "
                     + "; ".join(record.get("target_date_options") or ["해당 없음"]),
-                    "- 19:00~02:00 내 야간 슬롯: "
+                    f"- {SETTINGS.albamon.evening.available_from}~"
+                    f"{SETTINGS.albamon.evening.available_until} 내 야간 슬롯: "
                     + "; ".join(record.get("late_night_shift_options") or ["해당 없음"]),
                     f"- 급여: {record['salary_type']} {record['salary']}",
                     "- 급여 주의: "

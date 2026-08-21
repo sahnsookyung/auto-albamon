@@ -1,0 +1,222 @@
+# JobScout public defaults. These values contain no credentials or private data.
+#
+# Personal overrides belong in config/jobscout.local.toml (gitignored). To use a
+# different override file, set JOBSCOUT_CONFIG=/absolute/path/to/settings.toml.
+# Unknown options, invalid enum values, and secret-like keys fail at startup.
+# API keys and Discord webhooks belong only in .env; see .env.example.
+
+[albamon]
+# Albamon saved-search number. Set this in jobscout.local.toml; zero makes a
+# network refresh fail with a setup error instead of using somebody else's ID.
+saved_search_id = 0
+# Fail-closed public sentinel. Set a real inclusive deadline in the local file.
+availability_end_date = 1970-01-01
+# Result page size (1–10,000) and parallel detail workers (1–32).
+page_size = 5000
+workers = 24
+
+# Options: suit, multi_slot, evening, station_safety, remote, summer, urgent.
+# Remove an item to stop collecting that lane. `evening.enabled = false` also
+# disables the evening lane even when it remains in this list.
+enabled_sources = [
+  "suit",
+  "multi_slot",
+  "evening",
+  "station_safety",
+  "remote",
+  "summer",
+  "urgent",
+]
+
+# Options: one_day, under_one_week, one_week_to_one_month.
+# These are Albamon source buckets; detail text can still reject a contradiction.
+work_periods = ["one_day", "under_one_week", "one_week_to_one_month"]
+
+# Any Seoul district name may be listed. Remove districts to narrow collection.
+target_districts = [
+  "강남구", "강동구", "강북구", "강서구", "관악구", "광진구", "구로구",
+  "금천구", "노원구", "도봉구", "동대문구", "동작구", "마포구", "서대문구",
+  "서초구", "성동구", "성북구", "송파구", "양천구", "영등포구", "용산구",
+  "은평구", "종로구", "중구", "중랑구",
+]
+remote_minimum_hourly_won = 10320
+
+# Applicant eligibility inputs. Zero/"unrestricted" are privacy-safe defaults;
+# a posting with a conflicting age/gender restriction then fails closed.
+requested_age = 0
+requested_gender = "unrestricted"
+
+[albamon.evening]
+# Cross-midnight windows are supported, for example 19:00 through 02:00.
+enabled = true
+available_from = "19:00"
+available_until = "02:00"
+districts = ["강남구", "서초구", "송파구"]
+# Walking estimate = straight-line distance × route factor ÷ walking speed.
+station_walk_limit_minutes = 20
+walk_speed_kmh = 4.8
+walk_route_factor = 1.2
+
+# Each station needs its Albamon selector IDs and WGS84 coordinates. Duplicate
+# names or unsupported/malformed coordinate records fail at startup. Copy an
+# existing row when adding a station, then replace every value from Albamon's
+# public station selector and a verified map coordinate.
+[[albamon.evening.stations]]
+name = "역삼역"
+area_code = "1"
+line_code = "102"
+station_code = "10214"
+latitude = 37.5007176207
+longitude = 127.0366187692
+
+[[albamon.evening.stations]]
+name = "강남역"
+area_code = "1"
+line_code = "102"
+station_code = "10215"
+latitude = 37.4981646510
+longitude = 127.0283079009
+
+[[albamon.evening.stations]]
+name = "송파역"
+area_code = "1"
+line_code = "108"
+station_code = "10807"
+latitude = 37.4996861343
+longitude = 127.1121798926
+
+[[albamon.evening.stations]]
+name = "잠실역"
+area_code = "1"
+line_code = "102"
+station_code = "10209"
+latitude = 37.5133199977
+longitude = 127.1003147320
+
+[[albamon.evening.stations]]
+name = "잠실새내역"
+area_code = "1"
+line_code = "102"
+station_code = "10210"
+latitude = 37.5115686515
+longitude = 127.0863730771
+
+[[albamon.evening.stations]]
+name = "삼성역"
+area_code = "1"
+line_code = "102"
+station_code = "10212"
+latitude = 37.5088623566
+longitude = 127.0630752722
+
+[albamon.temporary_single_day]
+# ISO dates. Leave empty unless a temporary one-off lane is intentionally needed.
+active_dates = []
+target_dates = []
+
+[commute]
+# Inclusive ordinary limit; route cache age is measured from the configured
+# local refresh hour.
+base_limit_minutes = 50
+route_cache_hours = 24
+route_refresh_hour = 10
+
+# Safe public fallback only. The dashboard writes a confirmed personal origin to
+# the gitignored tools/commute_origin.json, which takes precedence over this.
+default_origin_name = "서울시청"
+default_origin_address = "서울특별시 중구 세종대로 110"
+default_origin_latitude = 37.5662952
+default_origin_longitude = 126.9779451
+
+[commute.premium_extension]
+# Only these districts can exceed the ordinary limit. Thresholds and slopes are
+# actual/reliable hourly won and added one-way commute minutes.
+districts = ["용산구", "영등포구"]
+maximum_minutes = 90
+first_tier_minimum_pay_won = 12000
+first_tier_maximum_pay_won = 15000
+first_tier_maximum_minutes = 80
+first_tier_won_per_minute = 100
+second_tier_maximum_pay_won = 18000
+second_tier_won_per_minute = 300
+
+[kakao]
+# Public transit documents 1,000 calls/day; 900 keeps a deliberate safety margin.
+daily_limit = 900
+requests_per_second = 4.0
+rate_limit_cooldown_seconds = 5.0
+
+[cache]
+# All values are positive. Retention must be at least the excluded-entry TTL.
+excluded_ttl_days = 7
+retention_days = 7
+closing_refresh_hours = 4
+eligible_refresh_hours = 12
+applied_refresh_hours = 24
+special_source_hours = 4
+weekend_agency_snapshot_hours = 8
+
+[ranking]
+# Search-zone groups affect labels and the secondary fit score, never route facts.
+core_districts = ["강남구", "송파구"]
+corridor_districts = ["서초구"]
+near_core_districts = ["강동구", "성동구", "광진구"]
+pay_score_baseline_hourly_won = 10320
+# Tier minimums must descend A > B > C.
+combined_tier_a_minimum = 95
+combined_tier_b_minimum = 82
+combined_tier_c_minimum = 68
+application_tier_a_minimum = 90
+application_tier_b_minimum = 75
+application_tier_c_minimum = 60
+
+# Optional district fit-score adjustments. Omitted districts receive zero.
+[ranking.district_penalties]
+"강남구" = 0
+"송파구" = 0
+"서초구" = -2
+"강동구" = -2
+"광진구" = -3
+"성동구" = -3
+"동작구" = -5
+"용산구" = -5
+"중구" = -5
+"관악구" = -6
+"동대문구" = -6
+"성북구" = -6
+"영등포구" = -8
+"종로구" = -8
+"중랑구" = -8
+"구로구" = -10
+"금천구" = -10
+"마포구" = -10
+"서대문구" = -10
+"양천구" = -12
+"강북구" = -12
+"노원구" = -12
+"강서구" = -14
+"은평구" = -14
+"도봉구" = -14
+
+[weekend_agencies]
+# Fail-closed public sentinel weekend. Set the desired live range locally.
+search_start = 1970-01-03
+search_end = 1970-01-03
+weekends_only = true
+# Eligibility always uses actual/base pay; 주휴-inclusive headlines cannot
+# rescue a lower base rate.
+minimum_actual_hourly_won = 12000
+# Options: withyou, huplux, eumplus, eoullim, rutine.
+enabled_sources = ["withyou", "huplux", "eumplus", "eoullim", "rutine"]
+
+[dashboard]
+# Browser exploration accepts at most this many days per request and retains a
+# bounded number of immutable exploration reports.
+new_match_window_hours = 24
+maximum_exploration_runs = 32
+maximum_exploration_days = 31
+exploration_cache_hours = 4
+
+[applicant]
+# This optional file is gitignored. See applicant_profile.example.toml.
+profile_path = "config/applicant_profile.local.toml"

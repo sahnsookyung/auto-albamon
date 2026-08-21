@@ -520,13 +520,36 @@ function updateHotelFilterSummary() {
     parts.push(`${elements.hotelFilterStartDate.value || "Any"}–${elements.hotelFilterEndDate.value || "Any"}`);
   }
   if (elements.hotelCommuteFilter.value) parts.push(selectedLabel(elements.hotelCommuteFilter));
-  if (!["", "12000"].includes(elements.hotelMinPayFilter.value)) parts.push(selectedLabel(elements.hotelMinPayFilter));
+  if (!["", configuredHotelMinimumPay()].includes(elements.hotelMinPayFilter.value)) {
+    parts.push(selectedLabel(elements.hotelMinPayFilter));
+  }
   if (elements.hotelShiftStart.value || elements.hotelShiftEnd.value) {
     parts.push(`${elements.hotelShiftStart.value || "Any"}–${elements.hotelShiftEnd.value || "Any"}`);
   }
   if (elements.hotelRoleFilter.value !== "all") parts.push(selectedLabel(elements.hotelRoleFilter));
   if (elements.hotelProviderFilter.value !== "all") parts.push(selectedLabel(elements.hotelProviderFilter));
-  elements.hotelFilterSummary.textContent = compactFilterSummary(parts, "Minimum ₩12,000 · all monitored shifts");
+  elements.hotelFilterSummary.textContent = compactFilterSummary(
+    parts,
+    `Minimum ${formatWon(configuredHotelMinimumPay())} · all monitored shifts`,
+  );
+}
+
+function configuredHotelMinimumPay() {
+  const configured = Number(state.hotelPayload?.policy?.minimum_actual_hourly_won);
+  return Number.isFinite(configured) && configured > 0 ? String(configured) : "0";
+}
+
+function syncConfiguredHotelMinimumPay() {
+  const configured = configuredHotelMinimumPay();
+  const select = elements.hotelMinPayFilter;
+  let configuredOption = [...select.options].find((option) => option.dataset.configured === "true");
+  if (!configuredOption) {
+    configuredOption = select.options[0];
+    configuredOption.dataset.configured = "true";
+  }
+  configuredOption.value = configured;
+  configuredOption.textContent = `${formatWon(configured)}+ · configured`;
+  if (!select.value) select.value = configured;
 }
 
 function hotelFilterControls() {
@@ -552,7 +575,7 @@ function setHotelFilterControls(filters = {}) {
   elements.hotelShiftStart.value = filters.shiftStart || "";
   elements.hotelShiftEnd.value = filters.shiftEnd || "";
   elements.hotelCommuteFilter.value = filters.maxCommute || "";
-  elements.hotelMinPayFilter.value = filters.minimumPay ?? "12000";
+  elements.hotelMinPayFilter.value = filters.minimumPay ?? "";
   elements.hotelRoleFilter.value = filters.role || "all";
   elements.hotelProviderFilter.value = filters.provider || "all";
   if (["hotel", "provider"].includes(filters.granularity)) {
@@ -684,7 +707,7 @@ function hotelPayModeCopy() {
   if (state.hotelPayMode === "weekly_allowance") {
     return "Using the published conditional 주휴 rate where stated; hotels without one retain actual pay as a clearly marked fallback. Eligibility is not guaranteed.";
   }
-  return "Using actual/base hourly pay. This is the reliable comparison and the ₩12,000 eligibility basis.";
+  return `Using actual/base hourly pay. This is the reliable comparison and the ${formatWon(configuredHotelMinimumPay())} eligibility basis.`;
 }
 
 function configureOverlapControl(control, count, providerBreakdown = []) {
@@ -1599,6 +1622,7 @@ function setGroupOverlaps(enabled) {
 function renderHotelView() {
   const payload = state.hotelPayload;
   if (!payload) return;
+  syncConfiguredHotelMinimumPay();
   populateHotelFilterOptions(payload.hotels || []);
   const hotels = filterHotels(payload.hotels || [], hotelFilterControls());
   state.filteredHotels = hotels;
@@ -3849,7 +3873,7 @@ elements.hotelSearchFilter.addEventListener("input", () => {
   }, 100);
 });
 elements.hotelClearFilters.addEventListener("click", () => {
-  setHotelFilterControls({ minimumPay: "12000" });
+  setHotelFilterControls({ minimumPay: configuredHotelMinimumPay() });
   state.hotelPayMode = "actual";
   renderSavedHotelSearches();
   removeStoredValue(HOTEL_FILTER_STORAGE_KEY);

@@ -6,6 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from tools import albamon_combined_jobs as combined
 from tools.albamon_refresh import (
     append_performance_history,
     main,
@@ -123,11 +124,11 @@ class AlbamonRefreshTests(unittest.TestCase):
 
         self.assertTrue(args.notify)
 
-    def test_default_availability_deadline_is_september_ninth(self):
+    def test_default_availability_deadline_comes_from_configuration(self):
         with patch("sys.argv", ["albamon_refresh.py"]):
             args = parse_args()
 
-        self.assertEqual("2026-09-09", args.availability_end_date.isoformat())
+        self.assertEqual(combined.DEFAULT_AVAILABILITY_END_DATE, args.availability_end_date)
 
     def test_overlapping_refresh_exits_cleanly_without_running_pipeline(self):
         with tempfile.TemporaryDirectory() as directory:

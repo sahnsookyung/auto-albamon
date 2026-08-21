@@ -86,7 +86,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--exclude-late-night",
         action="store_true",
-        help="Omit the separate station-corridor 19:00-02:00 evening lane.",
+        help="Omit the separately configured station-corridor evening lane.",
     )
     parser.add_argument(
         "--transit-cache", type=Path, default=transit.DEFAULT_OUTPUT

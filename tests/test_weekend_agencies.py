@@ -11,7 +11,13 @@ from zoneinfo import ZoneInfo
 from unittest import mock
 
 from tools import weekend_agency_refresh
-from tools.weekend_agencies.config import SEARCH_DATES
+from tools.weekend_agencies.config import (
+    SEARCH_DATES,
+    SEARCH_END,
+    SEARCH_START,
+    WEEKENDS_ONLY,
+    weekend_dates,
+)
 from tools.weekend_agencies.http import HttpClient, SourceFetchError
 from tools.weekend_agencies.hotel_digest import (
     aggregate_hotels,
@@ -51,6 +57,14 @@ from tools.weekend_agencies.sources.oulim import (
 )
 from tools.weekend_agencies.sources.rutine import parse_page as parse_rutine
 from tools.weekend_agencies.sources.withyou import parse_page as parse_withyou
+
+
+FIXTURE_SEARCH_DATES = (
+    date(2026, 8, 29),
+    date(2026, 8, 30),
+    date(2026, 9, 5),
+    date(2026, 9, 6),
+)
 
 
 WITHYOU_HTML = """
@@ -242,7 +256,7 @@ class SourceParserTests(unittest.TestCase):
         self.assertEqual("unencrypted_http", parsed.metadata["transport_security"])
 
     def test_eoullim_parser_reads_image_status_and_target_date_only(self):
-        offers = parse_eoullim(EOULLIM_HTML)
+        offers = parse_eoullim(EOULLIM_HTML, dates=FIXTURE_SEARCH_DATES)
         self.assertEqual(1, len(offers))
         self.assertEqual("eoullim", offers[0].agency)
         self.assertEqual("open", offers[0].status)
@@ -285,7 +299,7 @@ class SourceParserTests(unittest.TestCase):
         )
 
     def test_rutine_parser_keeps_every_target_date_shift(self):
-        offers = parse_rutine(RUTINE_HTML)
+        offers = parse_rutine(RUTINE_HTML, dates=FIXTURE_SEARCH_DATES)
 
         self.assertEqual(2, len(offers))
         self.assertEqual({"rutine"}, {item.agency for item in offers})
@@ -458,6 +472,7 @@ class PipelineTests(unittest.TestCase):
                 source_cache_path=Path(directory) / "source-cache.json",
                 sources=[Source()],
                 route_enricher=no_network,
+                search_dates=FIXTURE_SEARCH_DATES,
                 now=datetime(2026, 8, 17, tzinfo=ZoneInfo("Asia/Seoul")),
             )
             self.assertEqual(1, report["counts"]["jobs"])
@@ -536,6 +551,7 @@ class PipelineTests(unittest.TestCase):
                     output_prefix=prefix,
                     source_cache_path=Path(directory) / "source-cache.json",
                     sources=[BrokenSource()],
+                    search_dates=FIXTURE_SEARCH_DATES,
                     now=datetime(2026, 8, 17, tzinfo=ZoneInfo("Asia/Seoul")),
                 )
             self.assertEqual('{"sentinel": true}', previous.read_text(encoding="utf-8"))
@@ -571,6 +587,7 @@ class PipelineTests(unittest.TestCase):
                 "source_cache_path": root / "source-cache.json",
                 "sources": [source],
                 "route_enricher": no_network,
+                "search_dates": FIXTURE_SEARCH_DATES,
                 "now": datetime(2026, 8, 17, tzinfo=ZoneInfo("Asia/Seoul")),
             }
             first, _ = run_pipeline(**kwargs)
@@ -626,6 +643,7 @@ class PipelineTests(unittest.TestCase):
                 "source_cache_path": root / "source-cache.json",
                 "sources": [source],
                 "route_enricher": no_network,
+                "search_dates": FIXTURE_SEARCH_DATES,
                 "now": datetime(2026, 8, 17, tzinfo=ZoneInfo("Asia/Seoul")),
             }
             first, _ = run_pipeline(**kwargs)
@@ -660,6 +678,7 @@ class PipelineTests(unittest.TestCase):
                     output_prefix=root / "latest",
                     source_cache_path=cache_path,
                     sources=[GoodSource(), BrokenSource()],
+                    search_dates=FIXTURE_SEARCH_DATES,
                     now=datetime(2026, 8, 17, tzinfo=ZoneInfo("Asia/Seoul")),
                 )
 
@@ -673,10 +692,21 @@ class PipelineTests(unittest.TestCase):
             )
 
     def test_pipeline_stops_after_search_end(self):
-        with self.assertRaisesRegex(PipelineError, "search_window_ended"):
+        with (
+            mock.patch(
+                "tools.weekend_agencies.pipeline.SEARCH_DATES",
+                FIXTURE_SEARCH_DATES,
+            ),
+            mock.patch(
+                "tools.weekend_agencies.pipeline.SEARCH_END",
+                FIXTURE_SEARCH_DATES[-1],
+            ),
+            self.assertRaisesRegex(PipelineError, "search_window_ended"),
+        ):
             run_pipeline(
                 api_key="",
                 sources=[],
+                search_dates=FIXTURE_SEARCH_DATES,
                 now=datetime(2026, 9, 7, tzinfo=ZoneInfo("Asia/Seoul")),
                 write_outputs=False,
             )
@@ -1024,6 +1054,11 @@ class HotelierNotificationTests(unittest.TestCase):
                 "emit_status",
                 side_effect=lambda payload, **_kwargs: statuses.append(payload),
             ),
+            mock.patch.object(
+                weekend_agency_refresh,
+                "SEARCH_END",
+                date.max,
+            ),
         ):
             result = weekend_agency_refresh.main(
                 ["--env-file", "/tmp/workspace.env", "--notify"]
@@ -1038,16 +1073,19 @@ class HotelierNotificationTests(unittest.TestCase):
 
 
 class ConfigTests(unittest.TestCase):
-    def test_window_has_only_the_four_requested_weekend_dates(self):
-        self.assertEqual(
-            (
-                date(2026, 8, 29),
-                date(2026, 8, 30),
-                date(2026, 9, 5),
-                date(2026, 9, 6),
-            ),
-            SEARCH_DATES,
+    def test_search_dates_are_derived_from_configuration(self):
+        expected = (
+            weekend_dates(SEARCH_START, SEARCH_END)
+            if WEEKENDS_ONLY
+            else tuple(
+                SEARCH_START + timedelta(days=offset)
+                for offset in range((SEARCH_END - SEARCH_START).days + 1)
+            )
         )
+
+        self.assertEqual(expected, SEARCH_DATES)
+        if WEEKENDS_ONLY:
+            self.assertTrue(all(value.weekday() >= 5 for value in SEARCH_DATES))
 
 
 class HttpPacingTests(unittest.TestCase):

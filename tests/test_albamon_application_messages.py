@@ -26,6 +26,40 @@ from tools.albamon_application_messages import (
 REPORT_PATH = Path(
     "artifacts/albamon/2026-08-01-combined-reranked-no-endtime-preference.json"
 )
+TEST_PROFILE_FACTS = {
+    "english": {
+        "fact": "synthetic English-language example (영어 테스트)",
+        "source": "synthetic test fixture",
+    },
+    "hall_service": {
+        "fact": "synthetic profile fact: hall_service",
+        "source": "synthetic test fixture",
+    },
+    "health_certificate": {
+        "fact": "synthetic required-document example (보건증 테스트)",
+        "source": "synthetic test fixture",
+    },
+    "restaurant": {
+        "fact": "synthetic profile fact: restaurant",
+        "source": "synthetic test fixture",
+    },
+    "work_style": {
+        "fact": "synthetic profile fact: work_style",
+        "source": "synthetic test fixture",
+    },
+}
+_ORIGINAL_PROFILE_FACTS: dict[str, dict[str, str]] = {}
+
+
+def setUpModule() -> None:
+    _ORIGINAL_PROFILE_FACTS.update(PROFILE_FACTS)
+    PROFILE_FACTS.clear()
+    PROFILE_FACTS.update(TEST_PROFILE_FACTS)
+
+
+def tearDownModule() -> None:
+    PROFILE_FACTS.clear()
+    PROFILE_FACTS.update(_ORIGINAL_PROFILE_FACTS)
 
 
 class TransitCacheOriginTests(unittest.TestCase):
@@ -106,13 +140,13 @@ class CommutePolicyTests(unittest.TestCase):
         self.assertEqual(20, metadata["commute_priority_score"])
         self.assertIn("통근 없음", " ".join(reasons))
 
-    def test_bangbae_address_is_classified_as_the_seocho_corridor(self):
+    def test_bangbae_address_uses_the_configured_seocho_corridor(self):
         zone, label = classify_search_zone(
             {"working_address": "서울 서초구 방배동 123-4"}
         )
 
         self.assertEqual("seocho_corridor", zone)
-        self.assertIn("방배", label)
+        self.assertIn("서초구", label)
 
     def test_standard_zones_use_an_inclusive_fifty_minute_limit(self):
         for minutes, excluded in ((49, False), (50, False), (51, True)):
@@ -465,8 +499,8 @@ class AlbamonApplicationMessageTests(unittest.TestCase):
         )
         for recruit_no in health_jobs:
             record = by_id[recruit_no]
-            self.assertIn("보건증을 보유", record["message"])
-            self.assertIn("[REMOVED_PRIVATE_PROFILE_5d2d7223f1]", record["profile_facts_used"])
+            self.assertIn(TEST_PROFILE_FACTS["health_certificate"]["fact"], record["message"])
+            self.assertIn(TEST_PROFILE_FACTS["health_certificate"]["fact"], record["profile_facts_used"])
             self.assertFalse("보건증" in record["fit_warning"])
             self.assertTrue(any("제출 필요 시점" in note for note in record["verify_before_sending"]))
 
@@ -476,7 +510,7 @@ class AlbamonApplicationMessageTests(unittest.TestCase):
                 by_id[recruit_no]["send_readiness"],
             )
         self.assertEqual(
-            "conditional_on_requirement", by_id[118204044]["send_readiness"]
+            "ready_after_schedule_check", by_id[118204044]["send_readiness"]
         )
 
         for recruit_no in (118132532, 118199485):
@@ -507,8 +541,8 @@ class AlbamonApplicationMessageTests(unittest.TestCase):
             record for record in self.records if record["recruit_no"] == 118157941
         )
 
-        self.assertIn("중국어는 공고의 요구 수준으로 구사하지 못합니다", maison["message"])
-        self.assertIn("우선순위가 매우 낮습니다", maison["fit_warning"])
+        self.assertNotIn("중국어", maison["message"])
+        self.assertIn("중국어 능력이 설정된 지원자 프로필에서 확인되지 않음", maison["fit_warning"])
 
     def test_future_job_gets_safe_rule_based_fallback(self):
         future = {
@@ -540,8 +574,9 @@ class AlbamonApplicationMessageTests(unittest.TestCase):
         [record] = build_records(future)
 
         self.assertEqual("relevance_grounded", record["message_origin"])
-        self.assertIn("음식점과 [REMOVED_PRIVATE_PROFILE_7f43392d5e]", record["message"])
-        self.assertIn("보건증도 보유", record["message"])
+        self.assertIn(TEST_PROFILE_FACTS["restaurant"]["fact"], record["message"])
+        self.assertIn(TEST_PROFILE_FACTS["hall_service"]["fact"], record["message"])
+        self.assertIn(TEST_PROFILE_FACTS["health_certificate"]["fact"], record["message"])
         self.assertEqual("ready_after_schedule_check", record["send_readiness"])
 
     def test_cleaning_message_excludes_unrelated_technical_and_language_facts(self):
@@ -797,7 +832,7 @@ class AlbamonApplicationMessageTests(unittest.TestCase):
         [record] = build_records({"jobs": [job], "logistics_jobs": []})
 
         self.assertEqual("maybe_later", record["application_disposition"])
-        self.assertIn("자격증 보유 사실이 확인되지 않음", record["disposition_reason"])
+        self.assertIn("자격이 설정된 지원자 프로필에서 확인되지 않음", record["disposition_reason"])
 
     def test_cafe_experience_only_posting_is_automatically_deferred(self):
         job = {
@@ -823,7 +858,7 @@ class AlbamonApplicationMessageTests(unittest.TestCase):
         [record] = build_records({"jobs": [job], "logistics_jobs": []})
 
         self.assertEqual("maybe_later", record["application_disposition"])
-        self.assertIn("카페 실무 경력이 없음", record["disposition_reason"])
+        self.assertIn("카페 경력이 설정된 지원자 프로필에서 확인되지 않음", record["disposition_reason"])
 
     def test_distance_excluded_job_gets_own_heading_without_application_copy(self):
         job = {

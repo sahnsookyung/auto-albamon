@@ -32,20 +32,22 @@ from typing import Any, Iterable
 
 try:
     from tools.albamon_cache import DetailCache
+    from tools.jobscout_config import SETTINGS
 except ModuleNotFoundError:  # Support direct execution from the repository root.
     from albamon_cache import DetailCache
+    from jobscout_config import SETTINGS
 
 
 GENERAL_API_URL = "https://bff-general.albamon.com"
 SITE_URL = "https://www.albamon.com"
-DEFAULT_SUIT_NO = 35138482
-DEFAULT_PAGE_SIZE = 5_000
-DEFAULT_WORKERS = 24
+DEFAULT_SUIT_NO = SETTINGS.albamon.saved_search_id
+DEFAULT_PAGE_SIZE = SETTINGS.albamon.page_size
+DEFAULT_WORKERS = SETTINGS.albamon.workers
 REQUEST_TIMEOUT_SECONDS = 30
 MAX_READ_ATTEMPTS = 3
 DEFAULT_MANUAL_REVIEWS_PATH = Path(__file__).with_name("albamon_manual_reviews.json")
-LATE_NIGHT_AVAILABLE_FROM = "19:00"
-LATE_NIGHT_AVAILABLE_UNTIL = "02:00"
+LATE_NIGHT_AVAILABLE_FROM = SETTINGS.albamon.evening.available_from
+LATE_NIGHT_AVAILABLE_UNTIL = SETTINGS.albamon.evening.available_until
 LATE_NIGHT_AVAILABILITY = (
     f"{LATE_NIGHT_AVAILABLE_FROM}~{LATE_NIGHT_AVAILABLE_UNTIL}"
 )
@@ -1337,16 +1339,23 @@ def assess_driving_license_requirement(
     return False, "no driving licence requirement found"
 
 
-def demographic_compatible(view_data: dict[str, Any], *, age: int) -> tuple[bool, str]:
-    """Verify that a male applicant of the requested age is permitted."""
+def demographic_compatible(
+    view_data: dict[str, Any], *, age: int, gender: str = "male"
+) -> tuple[bool, str]:
+    """Verify configured demographic facts without assuming missing profile data."""
 
     gender = view_data.get("gender")
     gender_value = gender.get("value") if isinstance(gender, dict) else None
     gender_description = enum_description(gender)
-    if gender_value not in (None, "", "0", "M") and "남" not in gender_description:
+    listing_gender = "unrestricted"
+    if gender_value == "M" or ("남" in gender_description and "무관" not in gender_description):
+        listing_gender = "male"
+    elif gender_value not in (None, "", "0") or (
+        "여" in gender_description and "무관" not in gender_description
+    ):
+        listing_gender = "female"
+    if listing_gender != "unrestricted" and listing_gender != gender:
         return False, f"gender restriction: {gender_description or gender_value}"
-    if "여자" in gender_description and "무관" not in gender_description:
-        return False, f"gender restriction: {gender_description}"
 
     start_age = view_data.get("startAge")
     end_age = view_data.get("endAge")
@@ -1355,11 +1364,12 @@ def demographic_compatible(view_data: dict[str, Any], *, age: int) -> tuple[bool
         maximum = int(end_age or 0)
     except (TypeError, ValueError):
         minimum = maximum = 0
-    if minimum and age < minimum:
+    if minimum and (not age or age < minimum):
         return False, f"minimum age is {minimum}"
-    if maximum and age > maximum:
+    if maximum and (not age or age > maximum):
         return False, f"maximum age is {maximum}"
-    return True, f"male age {age} is allowed"
+    descriptor = f"age {age}" if age else "age unrestricted"
+    return True, f"{gender} {descriptor} is allowed"
 
 
 def education_compatible(view_data: dict[str, Any]) -> tuple[bool, str]:
@@ -2242,7 +2252,8 @@ def build_record(
         view_data
     )
     target_date_options, target_date_option_evidence = assess_independent_target_dates(
-        view_data, (date(2026, 8, 15), date(2026, 8, 17))
+        view_data,
+        tuple(sorted(SETTINGS.albamon.temporary_single_day.target_dates)),
     )
     salary, salary_notes, salary_detail_evidence = detail_adjusted_salary(
         search_job, view_data
@@ -2252,7 +2263,9 @@ def build_record(
     weekend_compatible, weekend_compatible_basis = assess_weekend_compatible(view_data)
     driving_required, driving_basis = assess_driving_license_requirement(view_data)
     demographics_match, demographics_basis = demographic_compatible(
-        view_data, age=26
+        view_data,
+        age=SETTINGS.albamon.requested_age,
+        gender=SETTINGS.albamon.requested_gender,
     )
     education_match, education_basis = education_compatible(view_data)
     (

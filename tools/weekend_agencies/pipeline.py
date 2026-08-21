@@ -14,8 +14,10 @@ from zoneinfo import ZoneInfo
 
 try:
     from tools.albamon_runtime import atomic_write_text
+    from tools.jobscout_config import SETTINGS
 except ModuleNotFoundError:  # Direct CLI execution via tools/.
     from albamon_runtime import atomic_write_text
+    from jobscout_config import SETTINGS
 
 from .agencies import (
     hotel_agency_catalog_payload,
@@ -50,7 +52,7 @@ class PipelineError(RuntimeError):
     pass
 
 
-SOURCE_SNAPSHOT_MAX_AGE_HOURS = 8
+SOURCE_SNAPSHOT_MAX_AGE_HOURS = SETTINGS.cache.weekend_agency_snapshot_hours
 PipelineProgress = Callable[[str, int, int, dict[str, Any]], None]
 
 
@@ -61,12 +63,16 @@ def _no_progress(
 
 
 def default_sources() -> tuple[object, ...]:
-    return (
-        WithYouSource(),
-        HupluxSource(),
-        EumplusSource(),
-        EoullimSource(),
-        RutineSource(),
+    catalog = {
+        "withyou": WithYouSource,
+        "huplux": HupluxSource,
+        "eumplus": EumplusSource,
+        "eoullim": EoullimSource,
+        "rutine": RutineSource,
+    }
+    return tuple(
+        catalog[source_name]()
+        for source_name in SETTINGS.weekend_agencies.enabled_sources
     )
 
 

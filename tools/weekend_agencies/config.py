@@ -7,9 +7,15 @@ from pathlib import Path
 
 from .agencies import HOTEL_AGENCIES
 
-SEARCH_START = date(2026, 8, 29)
-SEARCH_END = date(2026, 9, 6)
-MIN_ACTUAL_HOURLY_WON = 12_000
+try:
+    from tools.jobscout_config import SETTINGS
+except ModuleNotFoundError:  # Direct CLI execution via tools/.
+    from jobscout_config import SETTINGS
+
+SEARCH_START = SETTINGS.weekend_agencies.search_start
+SEARCH_END = SETTINGS.weekend_agencies.search_end
+WEEKENDS_ONLY = SETTINGS.weekend_agencies.weekends_only
+MIN_ACTUAL_HOURLY_WON = SETTINGS.weekend_agencies.minimum_actual_hourly_won
 
 
 def weekend_dates(start: date = SEARCH_START, end: date = SEARCH_END) -> tuple[date, ...]:
@@ -22,7 +28,14 @@ def weekend_dates(start: date = SEARCH_START, end: date = SEARCH_END) -> tuple[d
     )
 
 
-SEARCH_DATES = weekend_dates()
+SEARCH_DATES = (
+    weekend_dates()
+    if WEEKENDS_ONLY
+    else tuple(
+        SEARCH_START + timedelta(days=offset)
+        for offset in range((SEARCH_END - SEARCH_START).days + 1)
+    )
+)
 OUTPUT_PREFIX = Path("artifacts/weekend-agencies/latest")
 CACHE_DIR = Path("artifacts/weekend-agencies/cache")
 LOCK_PATH = CACHE_DIR / "refresh.lock"

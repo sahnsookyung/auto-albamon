@@ -1,0 +1,17 @@
+# Copy to config/applicant_profile.local.toml. This file is intentionally separate
+# because résumé facts are personal data. Only add statements you have verified.
+# Never add a name, phone number, email, birth date, exact home address, account
+# identifier, government ID, credential, API key, webhook, password, or token.
+
+[facts.health_certificate]
+fact = "Example verified experience; replace this in applicant_profile.local.toml."
+source = "user verified"
+
+[facts.customer_service]
+fact = "고객 응대 경험"
+source = "user verified"
+
+# Some mandatory filters use these reserved fact IDs when present:
+# cafe_experience, front_desk_experience, marine_license, chinese, english,
+# local_area, restaurant, hall_service, computer_excel, software, events,
+# work_style. Missing mandatory qualifications fail closed to manual review.

@@ -48,7 +48,7 @@ def unified_job(recruit_no: int, *, disposition: str = "apply") -> dict:
         "availability_end_date": "2026-09-09",
         "hard_requirements": ["Health certificate required"],
         "application_methods": ["online", "easy_sms"],
-        "message": "안녕하세요. [REMOVED_PRIVATE_PROFILE_7f43392d5e]과 보건증이 있습니다. 책임감 있게 일하겠습니다.",
+        "message": "안녕하세요. 관련 경험과 필수 서류를 확인했습니다.",
         "verify_before_sending": ["토·일 모두 근무 가능한지", "시급 적용 여부"],
     }
 
@@ -308,7 +308,7 @@ class AlbamonDiscordTests(unittest.TestCase):
 
         message = format_job_message(record, position=1, total=1)
 
-        self.assertIn("역삼·강남·송파·잠실·잠실새내·삼성 저녁", message)
+        self.assertIn("역삼역·강남역·송파역·잠실역·잠실새내역·삼성역 저녁", message)
         self.assertIn("19:00~02:00", message)
         self.assertIn("역세권 도보 추정 20분 이하", message)
         self.assertIn("삼성역 도보권 약 8분", message)
@@ -327,7 +327,7 @@ class AlbamonDiscordTests(unittest.TestCase):
 
         message = format_job_message(record, position=1, total=1)
 
-        self.assertIn("8/15·8/17", message)
+        self.assertIn("2026-08-17", message)
         self.assertIn("2026-08-17", message)
 
     def test_late_night_notification_shows_naver_future_elapsed_time(self):

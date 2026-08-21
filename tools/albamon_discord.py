@@ -31,6 +31,7 @@ try:
         exclusive_file_lock,
     )
     from tools.albamon_transit import ORIGIN as TRANSIT_ORIGIN
+    from tools.jobscout_config import SETTINGS
 except ModuleNotFoundError:  # Support direct execution from the repository root.
     from albamon_combined_jobs import normalized_text, semantic_duplicate_key
     from albamon_runtime import (
@@ -39,6 +40,7 @@ except ModuleNotFoundError:  # Support direct execution from the repository root
         exclusive_file_lock,
     )
     from albamon_transit import ORIGIN as TRANSIT_ORIGIN
+    from jobscout_config import SETTINGS
 
 
 DEFAULT_COMBINED_REPORT = Path("artifacts/albamon/latest-combined.json")
@@ -375,8 +377,9 @@ def format_job_message(record: dict[str, Any], *, position: int, total: int) -> 
         limit=260,
     )
     late_night = "songpa_late_night" in (record.get("eligibility_lanes") or [])
-    temporary_single_day = "aug_15_17_single_day" in (
-        record.get("eligibility_lanes") or []
+    temporary_single_day = bool(
+        {"temporary_single_day", "aug_15_17_single_day"}
+        & set(record.get("eligibility_lanes") or [])
     )
     late_night_commute = _late_night_commute_text(record) if late_night else ""
     station_area_text = ""
@@ -387,13 +390,20 @@ def format_job_message(record: dict[str, Any], *, position: int, total: int) -> 
             f"(직선 {record.get('evening_station_distance_km')}km, 보수적 추정)"
         )
     url = str(record.get("url") or "")
+    evening_label = (
+        f"{'·'.join(SETTINGS.albamon.evening.stations)} 저녁 · "
+        f"{SETTINGS.albamon.evening.available_from}~"
+        f"{SETTINGS.albamon.evening.available_until} · 역세권 도보 추정 "
+        f"{SETTINGS.albamon.evening.station_walk_limit_minutes}분 이하"
+    )
+    target_dates = ", ".join(record.get("target_date_options") or [])
     rendered = "\n".join(
         [
             f"🆕 **새 알바몬 지원 후보 {position}/{total}**",
             *(["🏠 **재택근무 · 통근 없음**"] if remote_job else []),
-            *( ["🌙 **역삼·강남·송파·잠실·잠실새내·삼성 저녁 · 19:00~02:00 · 역세권 도보 추정 20분 이하**"] if late_night else [] ),
+            *([f"🌙 **{evening_label}**"] if late_night else []),
             *(
-                ["📅 **8/15·8/17 중 표시된 날짜 1일만 선택 가능**"]
+                [f"📅 **{target_dates or '표시된 날짜'} 중 1일만 선택 가능**"]
                 if temporary_single_day
                 else []
             ),

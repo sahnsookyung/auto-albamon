@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Refresh the separate 2026-08-29 through 2026-09-06 weekend report."""
+"""Refresh the separately configured weekend-agency report."""
 
 from __future__ import annotations
 
