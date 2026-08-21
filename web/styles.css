@@ -361,7 +361,8 @@ tbody tr:focus-visible { outline: 2px solid var(--green); outline-offset: -2px; 
 .empty-state > span { display: block; margin-bottom: 10px; color: var(--line-strong); font-size: 44px; }
 .empty-state h3 { margin-bottom: 4px; color: var(--ink); }
 
-.map-panel { position: sticky; top: 90px; height: 658px; display: flex; align-self: start; flex-direction: column; }
+.map-panel { position: sticky; top: 90px; height: 658px; display: flex; align-self: start; flex-direction: column; overflow: visible; }
+.panel-heading--map, .hotel-visual-heading { position: relative; z-index: 1100; background: var(--paper); }
 .visualization-controls { display: flex; align-items: center; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
 .visualization-toggle button { min-width: 62px; }
 .chart-option-toggle { min-height: 28px; display: inline-flex; align-items: center; gap: 5px; padding: 4px 9px; color: var(--muted); background: white; border: 1px solid var(--line); border-radius: 999px; font-size: 10px; font-weight: 800; cursor: pointer; }
@@ -374,14 +375,18 @@ tbody tr:focus-visible { outline: 2px solid var(--green); outline-offset: -2px; 
 .map-legend, .chart-legend { flex-wrap: wrap; justify-content: flex-end; }
 .chart-legend { display: flex; align-items: center; }
 .map-legend span, .chart-legend span { display: flex; align-items: center; gap: 5px; }
+.legend-toggle { min-height: 26px; display: inline-flex; align-items: center; gap: 5px; padding: 4px 7px; color: var(--muted); background: #f4f7f5; border: 1px solid var(--line); border-radius: 999px; font: inherit; font-weight: 800; cursor: pointer; }
+.legend-toggle:not(.is-active) { opacity: .48; text-decoration: line-through; }
+.legend-toggle:focus-visible { outline: 2px solid rgba(18,107,75,.3); outline-offset: 2px; }
 .visual-legend-disclosure { position: relative; }
 .visual-legend-disclosure > summary { min-height: 28px; display: inline-flex; align-items: center; gap: 5px; padding: 4px 9px; color: var(--muted); background: white; border: 1px solid var(--line); border-radius: 999px; cursor: pointer; list-style: none; font-size: 10px; font-weight: 800; }
 .visual-legend-disclosure > summary::-webkit-details-marker { display: none; }
 .visual-legend-disclosure > summary::before { content: "?"; width: 14px; height: 14px; display: grid; place-items: center; color: var(--green-dark); background: var(--green-pale); border-radius: 50%; font-size: 9px; }
 .visual-legend-disclosure[open] > summary { color: var(--green-dark); border-color: rgba(18,107,75,.28); }
-.visual-legend-disclosure > .map-legend, .visual-legend-disclosure > .chart-legend { position: absolute; top: calc(100% + 6px); right: 0; z-index: 45; width: max-content; max-width: min(330px, 70vw); padding: 9px 10px; background: rgba(255,255,255,.98); border: 1px solid var(--line-strong); border-radius: 9px; box-shadow: 0 10px 28px rgba(15,43,32,.18); }
+.visual-legend-disclosure > .map-legend, .visual-legend-disclosure > .chart-legend { position: absolute; top: calc(100% + 6px); right: 0; z-index: 1200; width: max-content; max-width: min(330px, 70vw); padding: 9px 10px; background: rgba(255,255,255,.98); border: 1px solid var(--line-strong); border-radius: 9px; box-shadow: 0 10px 28px rgba(15,43,32,.18); }
 .dot { width: 8px; height: 8px; border-radius: 50%; }
 .dot--ready { background: var(--green); }
+.dot--muted { background: #89958f; }
 .dot--selected { background: #e27c3b; }
 .dot--frontier { background: #d39b2c; }
 #map { width: 100%; min-height: 500px; flex: 1; background: #e9efeb; }
@@ -573,7 +578,7 @@ tbody tr:focus-visible { outline: 2px solid var(--green); outline-offset: -2px; 
 .hotel-summary strong, .hotel-summary span { display: block; }
 .hotel-summary strong { margin-bottom: 1px; color: var(--green-dark); font-size: 19px; line-height: 1.1; }
 .hotel-summary span { color: var(--muted); font-size: 10px; font-weight: 750; text-transform: uppercase; letter-spacing: .04em; }
-.hotel-frontier-panel { overflow: hidden; }
+.hotel-frontier-panel { overflow: visible; }
 .hotel-frontier-heading {
   display: flex;
   align-items: center;
@@ -597,8 +602,9 @@ tbody tr:focus-visible { outline: 2px solid var(--green); outline-offset: -2px; 
 .source-warning { color: #74410e; background: var(--amber-pale); }
 .hotel-frontier-layout { display: grid; grid-template-columns: minmax(600px, 1.45fr) minmax(420px, 1fr); grid-template-areas: "table visual"; align-items: start; gap: 12px; padding: 10px 12px 14px; }
 .hotel-view-tabs { display: none; }
-.hotel-chart-card, .hotel-table-card { min-width: 0; margin: 0; overflow: hidden; border-radius: 12px; box-shadow: 0 5px 20px rgba(27,49,41,.04); }
-.hotel-chart-card { grid-area: visual; }
+.hotel-chart-card, .hotel-table-card { min-width: 0; margin: 0; border-radius: 12px; box-shadow: 0 5px 20px rgba(27,49,41,.04); }
+.hotel-chart-card { grid-area: visual; overflow: visible; }
+.hotel-table-card { overflow: hidden; }
 .hotel-table-card { grid-area: table; }
 .hotel-chart-card figcaption, .hotel-table-heading { min-height: 54px; padding: 10px 12px; border-bottom: 1px solid var(--line); }
 .hotel-visual-heading { display: flex; align-items: center; justify-content: space-between; gap: 14px; }

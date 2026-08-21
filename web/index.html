@@ -281,6 +281,10 @@
               <h2 id="map-heading">Commute origin</h2>
             </div>
             <div class="visualization-controls">
+              <div class="segmented-control pay-metric-toggle" role="group" aria-label="Albamon pay measure">
+                <button class="is-active" id="albamon-pay-hourly" type="button" aria-pressed="true">Hourly</button>
+                <button id="albamon-pay-total" type="button" aria-pressed="false">Shift total</button>
+              </div>
               <div class="segmented-control visualization-toggle" role="group" aria-label="Albamon visualization">
                 <button class="is-active" id="albamon-map-visual" type="button" aria-pressed="true">Map</button>
                 <button id="albamon-pareto-visual" type="button" aria-pressed="false">Pareto</button>
@@ -289,7 +293,8 @@
               <details class="visual-legend-disclosure">
                 <summary>Legend</summary>
                 <div class="map-legend" id="map-legend" aria-label="Map legend">
-                  <span><i class="dot dot--ready"></i>Actionable</span>
+                  <button class="legend-toggle is-active" id="albamon-marker-actionable" type="button" aria-pressed="true"><i class="dot dot--ready"></i>Actionable</button>
+                  <button class="legend-toggle is-active" id="albamon-marker-other" type="button" aria-pressed="true"><i class="dot dot--muted"></i>Other matches</button>
                   <span><i class="dot dot--selected"></i>Selected</span>
                 </div>
                 <div class="chart-legend" id="albamon-chart-legend" aria-label="Pareto chart legend" hidden>
@@ -316,7 +321,7 @@
       <section class="hotels-view" id="hotels-view" role="tabpanel" aria-labelledby="hotels-desk-tab" hidden>
         <section class="hotel-summary" aria-label="Hotel report summary">
           <article><strong id="hotel-summary-frontier">—</strong><span>On this frontier</span></article>
-          <article><strong id="hotel-summary-pay">—</strong><span>Highest frontier pay</span></article>
+          <article><strong id="hotel-summary-pay">—</strong><span id="hotel-summary-pay-label">Highest frontier hourly</span></article>
           <article><strong id="hotel-summary-commute">—</strong><span>Shortest verified commute</span></article>
         </section>
 
@@ -335,6 +340,13 @@
                 <div class="segmented-control" role="group" aria-label="Pareto pay basis">
                   <button class="is-active" id="hotel-pay-actual" type="button" aria-pressed="true">Actual pay</button>
                   <button id="hotel-pay-weekly" type="button" aria-pressed="false">With 주휴*</button>
+                </div>
+              </div>
+              <div class="control-group">
+                <span class="control-label">Compare</span>
+                <div class="segmented-control" role="group" aria-label="Hotel pay measure">
+                  <button class="is-active" id="hotel-pay-hourly" type="button" aria-pressed="true">Hourly</button>
+                  <button id="hotel-pay-total" type="button" aria-pressed="false">Shift total</button>
                 </div>
               </div>
             </div>
@@ -470,7 +482,7 @@
                   <thead>
                     <tr>
                       <th scope="col">Hotel</th>
-                      <th scope="col">Work-hour pay</th>
+                      <th scope="col" id="hotel-comparable-heading">Work-hour pay</th>
                       <th scope="col">Actual / 주휴*</th>
                       <th scope="col">Commute</th>
                       <th scope="col">Options</th>

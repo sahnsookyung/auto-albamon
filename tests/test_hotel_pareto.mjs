@@ -26,9 +26,13 @@ const hotels = [
     actual_hourly_max: 15000,
     pareto_actual_pay: 15000,
     pareto_weekly_allowance_pay: 15000,
+    pareto_actual_total_pay: 120000,
+    pareto_weekly_allowance_total_pay: 120000,
     transit_minutes: 50,
     pareto_actual: true,
     pareto_weekly_allowance: false,
+    pareto_actual_total: true,
+    pareto_weekly_allowance_total: false,
   },
   {
     employer: "Weekly",
@@ -36,18 +40,26 @@ const hotels = [
     weekly_allowance_hourly_max: 16800,
     pareto_actual_pay: 14000,
     pareto_weekly_allowance_pay: 16800,
+    pareto_actual_total_pay: 112000,
+    pareto_weekly_allowance_total_pay: 134400,
     transit_minutes: 30,
     pareto_actual: true,
     pareto_weekly_allowance: true,
+    pareto_actual_total: true,
+    pareto_weekly_allowance_total: true,
   },
   {
     employer: "Near",
     actual_hourly_max: 13200,
     pareto_actual_pay: 13200,
     pareto_weekly_allowance_pay: 13200,
+    pareto_actual_total_pay: 52800,
+    pareto_weekly_allowance_total_pay: 52800,
     transit_minutes: 18,
     pareto_actual: true,
     pareto_weekly_allowance: true,
+    pareto_actual_total: true,
+    pareto_weekly_allowance_total: true,
   },
 ];
 
@@ -56,6 +68,12 @@ test("pay mode changes both comparable value and frontier membership", () => {
   assert.equal(hotelComparablePay(hotels[1], "weekly_allowance"), 16800);
   assert.equal(isHotelOnFrontier(hotels[0], "actual"), true);
   assert.equal(isHotelOnFrontier(hotels[0], "weekly_allowance"), false);
+});
+
+test("pay metric switches the hotel comparison from hourly rate to shift total", () => {
+  assert.equal(hotelComparablePay(hotels[0], "actual", "shift_total"), 120_000);
+  assert.equal(hotelComparablePay(hotels[1], "weekly_allowance", "shift_total"), 134_400);
+  assert.equal(isHotelOnFrontier(hotels[0], "weekly_allowance", "shift_total"), false);
 });
 
 test("frontier rows and all-hotel rows are deterministic", () => {
@@ -86,6 +104,7 @@ test("interactive hotel points expose hover and detail metadata", () => {
     employer: "JW Marriott",
     area: "고속터미널역",
     pay: 16800,
+    payMetric: "hourly",
     commuteLabel: "30 min",
     optionLabel: "4 days · 3 times",
     providerLabel: "이음플러스",
@@ -170,6 +189,23 @@ test("provider comparisons preserve separate pay observations and change winner 
   assert.match(providerConicGradient(actual), /^conic-gradient\(/);
   assert.match(providerConicGradient(actual), /0deg 180deg/);
   assert.match(providerConicGradient(actual), /180deg 360deg/);
+});
+
+test("shift-total provider comparisons mark an actual-pay fallback when no weekly total is comparable", () => {
+  const [provider] = hotelProviderComparisons({
+    providers: [{
+      agency: "withyou",
+      label: "위드유",
+      actual_hourly_max: 13_000,
+      weekly_allowance_hourly_max: 15_600,
+      actual_shift_total_max: 104_000,
+      weekly_allowance_shift_total_max: null,
+    }],
+  }, "weekly_allowance", "shift_total");
+
+  assert.equal(provider.comparablePay, 104_000);
+  assert.equal(provider.usesActualFallback, true);
+  assert.equal(provider.payMetric, "shift_total");
 });
 
 test("provider Pareto mode emits one independently ranked point per hotel and source", () => {

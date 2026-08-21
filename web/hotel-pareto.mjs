@@ -1,13 +1,15 @@
 export const HOTEL_PAY_MODES = Object.freeze({
   actual: {
-    payField: "pareto_actual_pay",
-    frontierField: "pareto_actual",
+    hourly: { payField: "pareto_actual_pay", frontierField: "pareto_actual" },
+    shift_total: { payField: "pareto_actual_total_pay", frontierField: "pareto_actual_total" },
   },
   weekly_allowance: {
-    payField: "pareto_weekly_allowance_pay",
-    frontierField: "pareto_weekly_allowance",
+    hourly: { payField: "pareto_weekly_allowance_pay", frontierField: "pareto_weekly_allowance" },
+    shift_total: { payField: "pareto_weekly_allowance_total_pay", frontierField: "pareto_weekly_allowance_total" },
   },
 });
+
+export const HOTEL_PAY_METRICS = Object.freeze(["hourly", "shift_total"]);
 
 export const HOTEL_PROVIDER_COLORS = Object.freeze({
   withyou: "#2878b5",
@@ -59,39 +61,47 @@ export function hotelProviderColor(agency) {
   return FALLBACK_PROVIDER_COLORS[Math.abs(hash) % FALLBACK_PROVIDER_COLORS.length];
 }
 
-export function hotelProviderComparablePay(provider, mode = "actual") {
-  if (!HOTEL_PAY_MODES[mode]) throw new Error(`Unsupported hotel pay mode: ${mode}`);
-  const actualPay = positiveNumber(provider?.actual_hourly_max);
-  const weeklyPay = positiveNumber(provider?.weekly_allowance_hourly_max);
+export function hotelProviderComparablePay(provider, mode = "actual", metric = "hourly") {
+  if (!HOTEL_PAY_MODES[mode]?.[metric]) throw new Error(`Unsupported hotel pay selection: ${mode}/${metric}`);
+  const actualPay = positiveNumber(provider?.[metric === "shift_total" ? "actual_shift_total_max" : "actual_hourly_max"]);
+  const weeklyPay = positiveNumber(provider?.[metric === "shift_total" ? "weekly_allowance_shift_total_max" : "weekly_allowance_hourly_max"]);
   return mode === "weekly_allowance" ? weeklyPay || actualPay : actualPay;
 }
 
-export function hotelProviderComparisons(hotel, mode = "actual") {
+export function hotelProviderComparisons(hotel, mode = "actual", metric = "hourly") {
+  if (!HOTEL_PAY_MODES[mode]?.[metric]) throw new Error(`Unsupported hotel pay selection: ${mode}/${metric}`);
   const comparisons = new Map();
   for (const provider of hotel?.providers || []) {
     const agency = compactText(provider.agency || provider.label);
     if (!agency) continue;
     const actualPay = positiveNumber(provider.actual_hourly_max);
     const weeklyPay = positiveNumber(provider.weekly_allowance_hourly_max);
+    const actualTotal = positiveNumber(provider.actual_shift_total_max);
+    const weeklyTotal = positiveNumber(provider.weekly_allowance_shift_total_max);
     const current = comparisons.get(agency) || {
       agency,
       label: compactText(provider.label || agency) || agency,
       actualPay: null,
       weeklyPay: null,
+      actualTotal: null,
+      weeklyTotal: null,
       offerCount: 0,
       color: hotelProviderColor(agency),
     };
     current.actualPay = Math.max(current.actualPay || 0, actualPay || 0) || null;
     current.weeklyPay = Math.max(current.weeklyPay || 0, weeklyPay || 0) || null;
+    current.actualTotal = Math.max(current.actualTotal || 0, actualTotal || 0) || null;
+    current.weeklyTotal = Math.max(current.weeklyTotal || 0, weeklyTotal || 0) || null;
     current.offerCount += Number(provider.offer_count) || 0;
     comparisons.set(agency, current);
   }
   const normalized = [...comparisons.values()].map((provider) => ({
     ...provider,
-    comparablePay: mode === "weekly_allowance"
-      ? provider.weeklyPay || provider.actualPay
-      : provider.actualPay,
-    usesActualFallback: mode === "weekly_allowance" && !provider.weeklyPay,
+    comparablePay: metric === "shift_total"
+      ? mode === "weekly_allowance" ? provider.weeklyTotal || provider.actualTotal : provider.actualTotal
+      : mode === "weekly_allowance" ? provider.weeklyPay || provider.actualPay : provider.actualPay,
+    usesActualFallback: mode === "weekly_allowance" && !(metric === "shift_total" ? provider.weeklyTotal : provider.weeklyPay),
+    payMetric: metric,
   })).filter((provider) => provider.comparablePay);
   return normalized.sort((left, right) =>
     right.comparablePay - left.comparablePay ||
@@ -99,10 +109,10 @@ export function hotelProviderComparisons(hotel, mode = "actual") {
   );
 }
 
-export function mergedHotelProviderComparisons(hotels, mode = "actual") {
+export function mergedHotelProviderComparisons(hotels, mode = "actual", metric = "hourly") {
   const merged = new Map();
   for (const hotel of hotels || []) {
-    for (const provider of hotelProviderComparisons(hotel, mode)) {
+    for (const provider of hotelProviderComparisons(hotel, mode, metric)) {
       const current = merged.get(provider.agency) || {
         ...provider,
         hotelCount: 0,
@@ -112,6 +122,8 @@ export function mergedHotelProviderComparisons(hotels, mode = "actual") {
       current.offerCount += provider.offerCount;
       current.actualPay = Math.max(current.actualPay || 0, provider.actualPay || 0) || null;
       current.weeklyPay = Math.max(current.weeklyPay || 0, provider.weeklyPay || 0) || null;
+      current.actualTotal = Math.max(current.actualTotal || 0, provider.actualTotal || 0) || null;
+      current.weeklyTotal = Math.max(current.weeklyTotal || 0, provider.weeklyTotal || 0) || null;
       if (provider.comparablePay > current.comparablePay) {
         current.comparablePay = provider.comparablePay;
         current.usesActualFallback = provider.usesActualFallback;
@@ -159,10 +171,10 @@ export function hotelProviderBreakdown(points) {
   );
 }
 
-export function hotelPointProviderBreakdown(points, mode = "actual") {
+export function hotelPointProviderBreakdown(points, mode = "actual", metric = "hourly") {
   const providerPoints = (points || []).flatMap((point) => {
     if (point?.provider) return [point];
-    return hotelProviderComparisons(point?.hotel, mode).map((provider) => ({
+    return hotelProviderComparisons(point?.hotel, mode, metric).map((provider) => ({
       provider,
       pay: provider.comparablePay,
     }));
@@ -176,23 +188,23 @@ export function providerBreakdownConicGradient(breakdown) {
   ));
 }
 
-export function hotelComparablePay(hotel, mode = "actual") {
-  const config = HOTEL_PAY_MODES[mode];
-  if (!config) throw new Error(`Unsupported hotel pay mode: ${mode}`);
+export function hotelComparablePay(hotel, mode = "actual", metric = "hourly") {
+  const config = HOTEL_PAY_MODES[mode]?.[metric];
+  if (!config) throw new Error(`Unsupported hotel pay selection: ${mode}/${metric}`);
   const value = Number(hotel?.[config.payField]);
   return Number.isFinite(value) && value > 0 ? value : null;
 }
 
-export function isHotelOnFrontier(hotel, mode = "actual") {
-  const config = HOTEL_PAY_MODES[mode];
-  if (!config) throw new Error(`Unsupported hotel pay mode: ${mode}`);
+export function isHotelOnFrontier(hotel, mode = "actual", metric = "hourly") {
+  const config = HOTEL_PAY_MODES[mode]?.[metric];
+  if (!config) throw new Error(`Unsupported hotel pay selection: ${mode}/${metric}`);
   return hotel?.[config.frontierField] === true;
 }
 
-export function paretoHotelIds(hotels, mode = "actual") {
+export function paretoHotelIds(hotels, mode = "actual", metric = "hourly") {
   const candidates = (hotels || []).map((hotel) => ({
     id: String(hotel?.hotel_id || ""),
-    pay: hotelComparablePay(hotel, mode),
+    pay: hotelComparablePay(hotel, mode, metric),
     commute: verifiedCommuteMinutes(hotel?.transit_minutes),
   })).filter((item) => item.id && item.pay && item.commute !== null);
   return new Set(candidates.filter((candidate) => !candidates.some((other) =>
@@ -207,14 +219,14 @@ function compactText(value) {
   return String(value ?? "").replace(/\s+/g, " ").trim();
 }
 
-export function hotelParetoPoints(hotels, mode = "actual") {
-  return (hotels || []).map((hotel) => hotelPointForHotel(hotel, mode))
+export function hotelParetoPoints(hotels, mode = "actual", metric = "hourly") {
+  return (hotels || []).map((hotel) => hotelPointForHotel(hotel, mode, metric))
     .filter((point) => point.pay && point.commute !== null);
 }
 
-export function hotelProviderParetoPoints(hotels, mode = "actual") {
+export function hotelProviderParetoPoints(hotels, mode = "actual", metric = "hourly") {
   const points = (hotels || []).flatMap((hotel) =>
-    hotelProviderComparisons(hotel, mode).map((provider) => ({
+    hotelProviderComparisons(hotel, mode, metric).map((provider) => ({
       hotel,
       provider,
       pay: provider.comparablePay,
@@ -233,12 +245,13 @@ export function hotelProviderParetoPoints(hotels, mode = "actual") {
   }));
 }
 
-export function hotelPointForHotel(hotel, mode = "actual") {
+export function hotelPointForHotel(hotel, mode = "actual", metric = "hourly") {
   return {
     hotel,
-    pay: hotelComparablePay(hotel, mode),
+    pay: hotelComparablePay(hotel, mode, metric),
     commute: verifiedCommuteMinutes(hotel?.transit_minutes),
-    frontier: isHotelOnFrontier(hotel, mode),
+    frontier: isHotelOnFrontier(hotel, mode, metric),
+    payMetric: metric,
   };
 }
 
@@ -261,6 +274,7 @@ export function hotelPointSummary(point) {
     employer: compactText(hotel.employer) || "Unknown hotel",
     area: hotelLocationLabel(hotel),
     pay: Number(point?.pay) || 0,
+    payMetric: point?.payMetric === "shift_total" ? "shift_total" : "hourly",
     commuteLabel: Number.isFinite(point?.commute) ? `${point.commute} min` : "Unverified",
     optionLabel: `${Number(hotel.date_count) || 0} days · ${Number(hotel.shift_count) || 0} times`,
     providerLabel: providers.join(" · ") || "Provider unavailable",
@@ -276,12 +290,12 @@ export function hotelPointSummary(point) {
   };
 }
 
-export function hotelRows(hotels, { mode = "actual", showAll = false } = {}) {
+export function hotelRows(hotels, { mode = "actual", metric = "hourly", showAll = false } = {}) {
   const rows = (hotels || []).filter((hotel) =>
-    showAll || isHotelOnFrontier(hotel, mode)
+    showAll || isHotelOnFrontier(hotel, mode, metric)
   );
   return [...rows].sort((left, right) =>
-    (hotelComparablePay(right, mode) || 0) - (hotelComparablePay(left, mode) || 0) ||
+    (hotelComparablePay(right, mode, metric) || 0) - (hotelComparablePay(left, mode, metric) || 0) ||
     (Number(left.transit_minutes) || 10_000) - (Number(right.transit_minutes) || 10_000) ||
     String(left.employer || "").localeCompare(String(right.employer || ""), "ko")
   );

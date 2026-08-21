@@ -18,7 +18,7 @@ const job = (recruitNo, overrides = {}) => ({
   ...overrides,
 });
 
-test("chart points mirror the backend Pareto candidate rules", () => {
+test("chart points apply candidate rules and recompute the selected frontier", () => {
   const points = albamonParetoPoints([
     job(1, { pareto_frontier: true }),
     job(2, { application_disposition: "do_not_apply" }),
@@ -31,11 +31,23 @@ test("chart points mirror the backend Pareto candidate rules", () => {
       commute_policy_eligible: false,
       pareto_frontier: true,
     }),
+    job(7, { transit_minutes: 30, comparable_hourly_pay: 12_000, pareto_frontier: true }),
   ]);
 
-  assert.deepEqual(points.map((point) => point.job.recruit_no), [1, 5]);
-  assert.deepEqual(points.map((point) => point.mode), ["onsite", "remote"]);
-  assert.equal(points[1].commute, 0);
+  assert.deepEqual(points.map((point) => point.job.recruit_no), [1, 7, 5]);
+  assert.equal(points.find((point) => point.job.recruit_no === 7).frontier, false);
+  assert.equal(points.at(-1).commute, 0);
+});
+
+test("shift-total mode can change the frontier and excludes unknown totals", () => {
+  const input = [
+    job(1, { transit_minutes: 20, comparable_hourly_pay: 30_000, estimated_shift_earnings_won: 60_000 }),
+    job(2, { transit_minutes: 30, comparable_hourly_pay: 20_000, estimated_shift_earnings_won: 160_000 }),
+    job(3, { transit_minutes: 10, comparable_hourly_pay: 15_000, estimated_shift_earnings_won: null }),
+  ];
+
+  assert.deepEqual(albamonParetoPoints(input, "hourly").filter((point) => point.frontier).map((point) => point.job.recruit_no), [3, 1]);
+  assert.deepEqual(albamonParetoPoints(input, "shift_total").filter((point) => point.frontier).map((point) => point.job.recruit_no), [1, 2]);
 });
 
 test("frontier lines remain separate for onsite and remote comparisons", () => {
@@ -70,6 +82,7 @@ test("interactive point summaries expose concise hover and accessibility details
     title: "Weekend banquet helper",
     area: "강남구",
     pay: 18_000,
+    payMetric: "hourly",
     commuteLabel: "32 min",
     schedule: "토요일 · 10:00~18:00",
     frontier: true,
@@ -94,6 +107,7 @@ test("map point summaries preserve details outside the Pareto candidate set", ()
     title: "Evening banquet",
     area: "송파구",
     pay: 15_000,
+    payMetric: "hourly",
     commuteLabel: "Unverified",
     schedule: "금요일 · 19:00~23:00",
     frontier: false,

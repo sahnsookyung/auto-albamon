@@ -109,6 +109,9 @@ test("date, shift, commute, role and provider filters apply to exact options", (
   assert.equal(result[0].cross_agency_duplicate_count, 0);
   assert.deepEqual(result[0].providers.map((provider) => provider.agency), ["withyou"]);
   assert.equal(result[0].providers[0].actual_hourly_max, 13_000);
+  assert.equal(result[0].actual_shift_total_max, 104_000);
+  assert.equal(result[0].weekly_allowance_shift_total_max, 124_800);
+  assert.equal(result[0].providers[0].actual_shift_total_max, 104_000);
 });
 
 test("text search only considers options left by the other filters", () => {
@@ -147,6 +150,7 @@ test("filtering recalculates both Pareto frontiers and decision metrics", () => 
   const summary = hotelDecisionSummary(near);
 
   assert.equal(near.pareto_actual, true);
+  assert.equal(near.pareto_actual_total, true);
   assert.equal(result.find((hotel) => hotel.hotel_id === "far").pareto_actual, true);
   assert.equal(summary.adjustedHourly, 13_235);
   assert.equal(summary.hasLateReturnRisk, true);

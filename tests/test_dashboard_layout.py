@@ -88,6 +88,23 @@ class DashboardLayoutTests(unittest.TestCase):
         self.assertTrue(has_ancestor(self.parser, "hotel-chart-legend", class_name="visual-legend-disclosure"))
         self.assertTrue(has_ancestor(self.parser, "map-legend", class_name="visual-legend-disclosure"))
 
+    def test_pay_measure_and_marker_visibility_controls_are_semantic(self):
+        for control_id in (
+            "albamon-pay-hourly",
+            "albamon-pay-total",
+            "hotel-pay-hourly",
+            "hotel-pay-total",
+            "hotel-comparable-heading",
+            "albamon-marker-actionable",
+            "albamon-marker-other",
+        ):
+            expected_tag = "th" if control_id == "hotel-comparable-heading" else "button"
+            self.assertEqual(expected_tag, self.parser.tags_by_id[control_id])
+        self.assertIn(".visual-legend-disclosure > .map-legend", self.styles)
+        self.assertIn("z-index: 1200", self.styles)
+        self.assertIn(".map-panel { position: sticky", self.styles)
+        self.assertIn("overflow: visible", self.styles)
+
     def test_category_explanations_are_tooltips_instead_of_a_permanent_guide(self):
         self.assertNotIn("queue-guide", self.parser.classes)
         for card_id in ("summary-new-card", "summary-actionable-card", "summary-attention-card"):
