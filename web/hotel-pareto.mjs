@@ -33,7 +33,7 @@ function positiveNumber(value) {
   return Number.isFinite(number) && number > 0 ? number : null;
 }
 
-function verifiedCommuteMinutes(value) {
+export function hotelVerifiedCommuteMinutes(value) {
   if (value === null || value === undefined || value === "") return null;
   const number = Number(value);
   return Number.isFinite(number) && number >= 0 ? number : null;
@@ -205,7 +205,7 @@ export function paretoHotelIds(hotels, mode = "actual", metric = "hourly") {
   const candidates = (hotels || []).map((hotel) => ({
     id: String(hotel?.hotel_id || ""),
     pay: hotelComparablePay(hotel, mode, metric),
-    commute: verifiedCommuteMinutes(hotel?.transit_minutes),
+    commute: hotelVerifiedCommuteMinutes(hotel?.transit_minutes),
   })).filter((item) => item.id && item.pay && item.commute !== null);
   return new Set(candidates.filter((candidate) => !candidates.some((other) =>
     other.id !== candidate.id &&
@@ -230,8 +230,9 @@ export function hotelProviderParetoPoints(hotels, mode = "actual", metric = "hou
       hotel,
       provider,
       pay: provider.comparablePay,
-      commute: verifiedCommuteMinutes(hotel?.transit_minutes),
+      commute: hotelVerifiedCommuteMinutes(hotel?.transit_minutes),
       frontier: false,
+      payMetric: metric,
     }))
   ).filter((point) => point.pay && point.commute !== null);
   return points.map((point) => ({
@@ -249,7 +250,7 @@ export function hotelPointForHotel(hotel, mode = "actual", metric = "hourly") {
   return {
     hotel,
     pay: hotelComparablePay(hotel, mode, metric),
-    commute: verifiedCommuteMinutes(hotel?.transit_minutes),
+    commute: hotelVerifiedCommuteMinutes(hotel?.transit_minutes),
     frontier: isHotelOnFrontier(hotel, mode, metric),
     payMetric: metric,
   };

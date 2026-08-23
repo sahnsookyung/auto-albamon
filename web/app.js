@@ -15,6 +15,7 @@ import {
   hotelProviderComparisons,
   hotelProviderParetoPoints,
   hotelRows,
+  hotelVerifiedCommuteMinutes,
   isHotelOnFrontier,
   mergedHotelProviderComparisons,
   providerConicGradient,
@@ -1434,8 +1435,9 @@ function renderHotelRows(hotels) {
 
     const commuteCell = createElement("td", "hotel-commute-cell");
     commuteCell.dataset.label = "Commute";
-    appendText(commuteCell, "strong", "commute-value", `${hotel.transit_minutes} min`);
-    appendText(commuteCell, "small", "cell-secondary", "verified transit");
+    const commute = hotelVerifiedCommuteMinutes(hotel.transit_minutes);
+    appendText(commuteCell, "strong", "commute-value", commute === null ? "—" : `${commute} min`);
+    appendText(commuteCell, "small", "cell-secondary", commute === null ? "route not verified" : "verified transit");
 
     const optionsCell = createElement("td", "hotel-options-cell");
     optionsCell.dataset.label = "Available shifts";
@@ -1754,8 +1756,8 @@ function renderHotelView() {
     item.hotel ? item.pay : hotelComparablePay(item, state.hotelPayMode, state.payMetric) || 0
   ));
   const verifiedCommutes = hotels
-    .map((hotel) => Number(hotel.transit_minutes))
-    .filter((minutes) => Number.isFinite(minutes) && minutes >= 0);
+    .map((hotel) => hotelVerifiedCommuteMinutes(hotel.transit_minutes))
+    .filter((minutes) => minutes !== null);
   elements.hotelSummaryFrontier.textContent = formatNumber(frontier.length);
   elements.hotelSummaryPay.textContent = formatComparablePay(highestPay);
   elements.hotelSummaryPayLabel.textContent = state.payMetric === "shift_total"

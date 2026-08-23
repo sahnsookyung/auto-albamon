@@ -857,6 +857,8 @@ tbody tr:focus-visible { outline: 2px solid var(--green); outline-offset: -2px; 
   .hotel-visual-heading > div:first-child { flex: 0 1 auto; }
   .hotel-visual-heading .visualization-controls { width: 100%; justify-content: flex-start; }
   .hotel-visual-heading .visualization-toggle { width: auto; }
+  #hotel-chart-card .visual-legend-disclosure > .map-legend,
+  #hotel-chart-card .visual-legend-disclosure > .chart-legend { right: auto; left: 0; max-width: calc(100vw - 50px); }
   .hotel-map, .hotel-map-fallback { min-height: 320px; }
   .hotel-chart-card figcaption, .hotel-table-heading { min-height: 54px; padding: 10px 11px; }
   .hotel-table-scroll { max-height: 520px; overflow-x: hidden; }

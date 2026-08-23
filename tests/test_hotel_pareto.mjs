@@ -13,6 +13,7 @@ import {
   hotelProviderComparisons,
   hotelProviderParetoPoints,
   hotelRows,
+  hotelVerifiedCommuteMinutes,
   isHotelOnFrontier,
   mergedHotelProviderComparisons,
   paretoHotelIds,
@@ -152,6 +153,15 @@ test("hotels without a verified commute are excluded from every frontier project
   assert.equal(hotelPointSummary(hotelPointForHotel(unknown)).commuteLabel, "Unverified");
 });
 
+test("verified commute parsing never converts missing values into zero minutes", () => {
+  assert.equal(hotelVerifiedCommuteMinutes(null), null);
+  assert.equal(hotelVerifiedCommuteMinutes(undefined), null);
+  assert.equal(hotelVerifiedCommuteMinutes(""), null);
+  assert.equal(hotelVerifiedCommuteMinutes(-1), null);
+  assert.equal(hotelVerifiedCommuteMinutes("0"), 0);
+  assert.equal(hotelVerifiedCommuteMinutes("30"), 30);
+});
+
 test("mapped coordinates provide an honest location fallback without a source address", () => {
   assert.equal(hotelLocationLabel({ latitude: 37.5014, longitude: 127.03545 }), "Mapped worksite");
   assert.equal(hotelLocationLabel({ latitude: null, longitude: null }), "Location unavailable");
@@ -206,6 +216,25 @@ test("shift-total provider comparisons mark an actual-pay fallback when no weekl
   assert.equal(provider.comparablePay, 104_000);
   assert.equal(provider.usesActualFallback, true);
   assert.equal(provider.payMetric, "shift_total");
+});
+
+test("shift-total provider Pareto points preserve their metric in chooser summaries", () => {
+  const [point] = hotelProviderParetoPoints([{
+    hotel_id: "provider-total",
+    employer: "Provider Total Hotel",
+    transit_minutes: 25,
+    date_count: 1,
+    shift_count: 1,
+    providers: [{
+      agency: "withyou",
+      label: "위드유",
+      actual_shift_total_max: 129_600,
+    }],
+  }], "actual", "shift_total");
+
+  assert.equal(point.payMetric, "shift_total");
+  assert.equal(hotelPointSummary(point).payMetric, "shift_total");
+  assert.equal(hotelPointSummary(point).pay, 129_600);
 });
 
 test("provider Pareto mode emits one independently ranked point per hotel and source", () => {

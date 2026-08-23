@@ -48,6 +48,7 @@ class DashboardLayoutTests(unittest.TestCase):
     def setUpClass(cls):
         cls.html = (ROOT / "web" / "index.html").read_text(encoding="utf-8")
         cls.styles = (ROOT / "web" / "styles.css").read_text(encoding="utf-8")
+        cls.app = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
         cls.parser = LayoutParser()
         cls.parser.feed(cls.html)
 
@@ -76,11 +77,18 @@ class DashboardLayoutTests(unittest.TestCase):
         self.assertIn(".hotel-results-table .hotel-options-cell", self.styles)
         self.assertIn(".hotel-visual-heading > div:first-child { flex: 0 1 auto; }", self.styles)
         self.assertIn(".hotel-date-disclosure > summary { display: grid;", self.styles)
+        self.assertIn("#hotel-chart-card .visual-legend-disclosure > .map-legend", self.styles)
+        self.assertIn("right: auto; left: 0; max-width: calc(100vw - 50px);", self.styles)
         self.assertIn("html { min-width: 320px; overflow-x: clip;", self.styles)
         self.assertNotIn("th:nth-child(3), td:nth-child(3) { display: none; }", self.styles)
         self.assertNotIn("th:nth-child(4), td:nth-child(4) { display: none; }", self.styles)
         self.assertTrue(has_ancestor(self.parser, "hotel-list-tab", class_name="hotel-view-tabs"))
         self.assertTrue(has_ancestor(self.parser, "hotel-visual-tab", class_name="hotel-view-tabs"))
+
+    def test_unverified_hotel_commute_is_not_presented_as_zero_or_verified(self):
+        self.assertIn("hotelVerifiedCommuteMinutes(hotel.transit_minutes)", self.app)
+        self.assertIn('commute === null ? "—" : `${commute} min`', self.app)
+        self.assertIn('commute === null ? "route not verified" : "verified transit"', self.app)
 
     def test_secondary_reference_and_legends_start_collapsed(self):
         self.assertNotIn("open", self.parser.attributes_by_id["agency-catalog-panel"])
