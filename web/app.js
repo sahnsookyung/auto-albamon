@@ -6,11 +6,20 @@ import {
 } from "/job-view-model.mjs";
 import {
   hotelComparablePay,
+  hotelLocationLabel,
   hotelParetoPoints,
   hotelPointForHotel,
+  hotelPointId,
+  hotelPointProviderBreakdown,
   hotelPointSummary,
+  hotelProviderComparisons,
+  hotelProviderParetoPoints,
   hotelRows,
+  hotelVerifiedCommuteMinutes,
   isHotelOnFrontier,
+  mergedHotelProviderComparisons,
+  providerConicGradient,
+  providerBreakdownConicGradient,
 } from "/hotel-pareto.mjs";
 import {
   albamonFrontierGroups,
@@ -23,7 +32,11 @@ import {
   hotelDecisionSummary,
   serializeHotelFilters,
 } from "/hotel-view-model.mjs";
-import { clusterProjectedPoints } from "/point-layout.mjs";
+import {
+  clusterProjectedPoints,
+  interactivePointControls,
+  PARETO_SHARED_POSITION_DISTANCE,
+} from "/point-layout.mjs";
 import {
   readStoredJson,
   removeStoredValue,
@@ -55,12 +68,20 @@ const state = {
   hotelPayload: null,
   filteredHotels: [],
   hotelPayMode: "actual",
+  payMetric: "hourly",
+  hotelGranularity: "hotel",
+  hotelMobileView: "list",
+  groupOverlaps: true,
+  albamonMarkerVisibility: { actionable: true, other: true },
+  hotelMarkerVisibility: { frontier: true, comparable: true },
   hotelVisualization: "pareto",
   hotelLoadingPromise: null,
   hotelMap: null,
   hotelMapResizeObserver: null,
   hotelOriginMarker: null,
   hotelMarkers: new Map(),
+  hotelMapLabels: [],
+  hotelLabelFrame: null,
   hotelPointsById: new Map(),
   hotelPointClusters: new Map(),
   albamonPointClusters: new Map(),
@@ -79,6 +100,7 @@ const FILTER_STORAGE_KEY = "jobscout.dashboard.filters.v1";
 const HOTEL_SEARCH_STORAGE_KEY = "jobscout.hotel-date-search.v1";
 const HOTEL_FILTER_STORAGE_KEY = "jobscout.hotel-result-filters.v1";
 const HOTEL_SAVED_SEARCH_STORAGE_KEY = "jobscout.hotel-saved-searches.v1";
+const VISUALIZATION_STORAGE_KEY = "jobscout.visualization.v1";
 const LEAFLET_VERSION = "1.9.4";
 const LEAFLET_BASE_URL = `https://unpkg.com/leaflet@${LEAFLET_VERSION}/dist`;
 const CAPITAL_REGION_BOUNDS = { minLat: 36.8, maxLat: 38.3, minLon: 125.8, maxLon: 128.3 };
@@ -116,6 +138,7 @@ const elements = {
   resultCount: document.querySelector("#result-count"),
   resultsEyebrow: document.querySelector("#results-eyebrow"),
   filterFeedback: document.querySelector("#filter-feedback"),
+  albamonFilterSummary: document.querySelector("#albamon-filter-summary"),
   shortlistFilter: document.querySelector("#shortlist-filter"),
   shortlistTotal: document.querySelector("#shortlist-total"),
   rows: document.querySelector("#job-rows"),
@@ -137,6 +160,11 @@ const elements = {
   visualizationCaption: document.querySelector("#visualization-caption"),
   albamonMapVisual: document.querySelector("#albamon-map-visual"),
   albamonParetoVisual: document.querySelector("#albamon-pareto-visual"),
+  albamonGroupOverlaps: document.querySelector("#albamon-group-overlaps"),
+  albamonPayHourly: document.querySelector("#albamon-pay-hourly"),
+  albamonPayTotal: document.querySelector("#albamon-pay-total"),
+  albamonMarkerActionable: document.querySelector("#albamon-marker-actionable"),
+  albamonMarkerOther: document.querySelector("#albamon-marker-other"),
   albamonParetoChart: document.querySelector("#albamon-pareto-chart"),
   albamonParetoTooltip: document.querySelector("#albamon-pareto-tooltip"),
   mapLegend: document.querySelector("#map-legend"),
@@ -153,12 +181,17 @@ const elements = {
   comparisonGrid: document.querySelector("#comparison-grid"),
   closeCompare: document.querySelector("#close-compare"),
   toast: document.querySelector("#toast"),
-  hotelSummaryTotal: document.querySelector("#hotel-summary-total"),
   hotelSummaryFrontier: document.querySelector("#hotel-summary-frontier"),
   hotelSummaryPay: document.querySelector("#hotel-summary-pay"),
-  hotelSummaryWeekly: document.querySelector("#hotel-summary-weekly"),
+  hotelSummaryPayLabel: document.querySelector("#hotel-summary-pay-label"),
+  hotelSummaryCommute: document.querySelector("#hotel-summary-commute"),
   hotelPayActual: document.querySelector("#hotel-pay-actual"),
   hotelPayWeekly: document.querySelector("#hotel-pay-weekly"),
+  hotelPayHourly: document.querySelector("#hotel-pay-hourly"),
+  hotelPayTotal: document.querySelector("#hotel-pay-total"),
+  hotelGranularityHotel: document.querySelector("#hotel-granularity-hotel"),
+  hotelGranularityProvider: document.querySelector("#hotel-granularity-provider"),
+  hotelGroupOverlaps: document.querySelector("#hotel-group-overlaps"),
   hotelBasisNote: document.querySelector("#hotel-basis-note"),
   hotelSourceWarning: document.querySelector("#hotel-source-warning"),
   hotelMapVisual: document.querySelector("#hotel-map-visual"),
@@ -171,8 +204,12 @@ const elements = {
   hotelParetoTooltip: document.querySelector("#hotel-pareto-tooltip"),
   hotelMap: document.querySelector("#hotel-map"),
   hotelMapFallback: document.querySelector("#hotel-map-fallback"),
+  hotelFrontierLayout: document.querySelector(".hotel-frontier-layout"),
+  hotelListTab: document.querySelector("#hotel-list-tab"),
+  hotelVisualTab: document.querySelector("#hotel-visual-tab"),
   hotelTableHeading: document.querySelector("#hotel-table-heading"),
   hotelTableFeedback: document.querySelector("#hotel-table-feedback"),
+  hotelComparableHeading: document.querySelector("#hotel-comparable-heading"),
   hotelRows: document.querySelector("#hotel-rows"),
   hotelEmpty: document.querySelector("#hotel-empty-state"),
   agencyCatalogRows: document.querySelector("#agency-catalog-rows"),
@@ -198,6 +235,7 @@ const elements = {
   hotelRoleFilter: document.querySelector("#hotel-role-filter"),
   hotelProviderFilter: document.querySelector("#hotel-provider-filter"),
   hotelFilterFeedback: document.querySelector("#hotel-filter-feedback"),
+  hotelFilterSummary: document.querySelector("#hotel-filter-summary"),
   hotelClearFilters: document.querySelector("#hotel-clear-filters"),
   hotelSavedSearch: document.querySelector("#hotel-saved-search"),
   hotelSaveSearch: document.querySelector("#hotel-save-search"),
@@ -227,6 +265,7 @@ const elements = {
   originConfirmButton: document.querySelector("#origin-confirm-button"),
   pointChoiceDialog: document.querySelector("#point-choice-dialog"),
   pointChoiceTitle: document.querySelector("#point-choice-title"),
+  pointChoiceLegend: document.querySelector("#point-choice-legend"),
   pointChoiceList: document.querySelector("#point-choice-list"),
   closePointChoice: document.querySelector("#close-point-choice"),
   queueFilterButtons: [...document.querySelectorAll("[data-queue-filter]")],
@@ -432,6 +471,115 @@ function persistHotelSearchPreferences() {
   });
 }
 
+function restoreVisualizationPreferences() {
+  const saved = readStoredJson(VISUALIZATION_STORAGE_KEY, {}) || {};
+  const legacyHotelFilters = readStoredJson(HOTEL_FILTER_STORAGE_KEY, {}) || {};
+  const params = new URLSearchParams(window.location.search);
+  const legacyUrlValue = params.get("hotel_groupOverlaps");
+  const value = saved.groupOverlaps ?? legacyUrlValue ?? legacyHotelFilters.groupOverlaps;
+  if ([true, false, "true", "false"].includes(value)) {
+    state.groupOverlaps = value === true || value === "true";
+  }
+  if (["hourly", "shift_total"].includes(saved.payMetric)) state.payMetric = saved.payMetric;
+  for (const category of ["actionable", "other"]) {
+    if (typeof saved.albamonMarkers?.[category] === "boolean") {
+      state.albamonMarkerVisibility[category] = saved.albamonMarkers[category];
+    }
+  }
+  for (const category of ["frontier", "comparable"]) {
+    if (typeof saved.hotelMarkers?.[category] === "boolean") {
+      state.hotelMarkerVisibility[category] = saved.hotelMarkers[category];
+    }
+  }
+  if (Object.prototype.hasOwnProperty.call(legacyHotelFilters, "groupOverlaps")) {
+    const migratedHotelFilters = { ...legacyHotelFilters };
+    delete migratedHotelFilters.groupOverlaps;
+    writeStoredJson(HOTEL_FILTER_STORAGE_KEY, migratedHotelFilters);
+  }
+  if (legacyUrlValue !== null) {
+    params.delete("hotel_groupOverlaps");
+    const query = params.toString();
+    window.history.replaceState(null, "", `${window.location.pathname}${query ? `?${query}` : ""}${window.location.hash}`);
+  }
+}
+
+function persistVisualizationPreferences() {
+  writeStoredJson(VISUALIZATION_STORAGE_KEY, {
+    groupOverlaps: state.groupOverlaps,
+    payMetric: state.payMetric,
+    albamonMarkers: state.albamonMarkerVisibility,
+    hotelMarkers: state.hotelMarkerVisibility,
+  });
+}
+
+function compactFilterSummary(parts, fallback) {
+  const visible = parts.filter(Boolean);
+  if (!visible.length) return fallback;
+  if (visible.length <= 3) return visible.join(" · ");
+  return `${visible.slice(0, 3).join(" · ")} · +${visible.length - 3}`;
+}
+
+function selectedLabel(control) {
+  return control?.selectedOptions?.[0]?.textContent?.trim() || "";
+}
+
+function updateAlbamonFilterSummary() {
+  const parts = [];
+  const query = cleanText(elements.search.value);
+  if (query) parts.push(`“${query}”`);
+  if (elements.status.value !== "apply") parts.push(selectedLabel(elements.status));
+  if (elements.commute.value !== "policy") parts.push(selectedLabel(elements.commute));
+  if (elements.pay.value !== "0") parts.push(selectedLabel(elements.pay));
+  if (elements.schedule.value !== "all") parts.push(selectedLabel(elements.schedule));
+  if (elements.district.value !== "all") parts.push(elements.district.value);
+  if (elements.zone.value !== "all") parts.push(selectedLabel(elements.zone));
+  if (elements.newOnly.checked) parts.push("New 24h");
+  if (elements.closingOnly.checked) parts.push("Closing 72h");
+  if (elements.requirements.checked) parts.push("No hard requirements");
+  if (elements.easyApply.checked) parts.push("Easy apply");
+  elements.albamonFilterSummary.textContent = compactFilterSummary(parts, "Default policy view");
+}
+
+function updateHotelFilterSummary() {
+  const parts = [];
+  const query = cleanText(elements.hotelSearchFilter.value);
+  if (query) parts.push(`“${query}”`);
+  if (elements.hotelFilterStartDate.value || elements.hotelFilterEndDate.value) {
+    parts.push(`${elements.hotelFilterStartDate.value || "Any"}–${elements.hotelFilterEndDate.value || "Any"}`);
+  }
+  if (elements.hotelCommuteFilter.value) parts.push(selectedLabel(elements.hotelCommuteFilter));
+  if (!["", configuredHotelMinimumPay()].includes(elements.hotelMinPayFilter.value)) {
+    parts.push(selectedLabel(elements.hotelMinPayFilter));
+  }
+  if (elements.hotelShiftStart.value || elements.hotelShiftEnd.value) {
+    parts.push(`${elements.hotelShiftStart.value || "Any"}–${elements.hotelShiftEnd.value || "Any"}`);
+  }
+  if (elements.hotelRoleFilter.value !== "all") parts.push(selectedLabel(elements.hotelRoleFilter));
+  if (elements.hotelProviderFilter.value !== "all") parts.push(selectedLabel(elements.hotelProviderFilter));
+  elements.hotelFilterSummary.textContent = compactFilterSummary(
+    parts,
+    `Minimum ${formatWon(configuredHotelMinimumPay())} · all monitored shifts`,
+  );
+}
+
+function configuredHotelMinimumPay() {
+  const configured = Number(state.hotelPayload?.policy?.minimum_actual_hourly_won);
+  return Number.isFinite(configured) && configured > 0 ? String(configured) : "0";
+}
+
+function syncConfiguredHotelMinimumPay() {
+  const configured = configuredHotelMinimumPay();
+  const select = elements.hotelMinPayFilter;
+  let configuredOption = [...select.options].find((option) => option.dataset.configured === "true");
+  if (!configuredOption) {
+    configuredOption = select.options[0];
+    configuredOption.dataset.configured = "true";
+  }
+  configuredOption.value = configured;
+  configuredOption.textContent = `${formatWon(configured)}+ · configured`;
+  if (!select.value) select.value = configured;
+}
+
 function hotelFilterControls() {
   return {
     query: elements.hotelSearchFilter.value,
@@ -444,6 +592,7 @@ function hotelFilterControls() {
     role: elements.hotelRoleFilter.value,
     provider: elements.hotelProviderFilter.value,
     payMode: state.hotelPayMode,
+    granularity: state.hotelGranularity,
   };
 }
 
@@ -454,9 +603,12 @@ function setHotelFilterControls(filters = {}) {
   elements.hotelShiftStart.value = filters.shiftStart || "";
   elements.hotelShiftEnd.value = filters.shiftEnd || "";
   elements.hotelCommuteFilter.value = filters.maxCommute || "";
-  elements.hotelMinPayFilter.value = filters.minimumPay ?? "12000";
+  elements.hotelMinPayFilter.value = filters.minimumPay ?? "";
   elements.hotelRoleFilter.value = filters.role || "all";
   elements.hotelProviderFilter.value = filters.provider || "all";
+  if (["hotel", "provider"].includes(filters.granularity)) {
+    state.hotelGranularity = filters.granularity;
+  }
 }
 
 function hotelFiltersFromUrl() {
@@ -464,7 +616,7 @@ function hotelFiltersFromUrl() {
   const result = {};
   for (const key of [
     "query", "dateStart", "dateEnd", "shiftStart", "shiftEnd",
-    "maxCommute", "minimumPay", "role", "provider", "payMode",
+    "maxCommute", "minimumPay", "role", "provider", "payMode", "granularity",
   ]) {
     const value = params.get(`hotel_${key}`);
     if (value !== null) result[key] = value;
@@ -489,7 +641,7 @@ function persistHotelFilters({ updateUrl = true } = {}) {
   const params = new URLSearchParams(window.location.search);
   for (const key of [
     "query", "dateStart", "dateEnd", "shiftStart", "shiftEnd",
-    "maxCommute", "minimumPay", "role", "provider", "payMode",
+    "maxCommute", "minimumPay", "role", "provider", "payMode", "granularity", "groupOverlaps",
   ]) params.delete(`hotel_${key}`);
   for (const [key, value] of Object.entries(serializeHotelFilters(filters))) {
     params.set(`hotel_${key}`, value);
@@ -516,6 +668,7 @@ function renderSavedHotelSearches(selected = "") {
   elements.hotelSavedSearch.replaceChildren(fragment);
   elements.hotelSavedSearch.value = selected;
   elements.hotelDeleteSearch.disabled = !selected;
+  elements.hotelDeleteSearch.hidden = !selected;
 }
 
 function saveCurrentHotelSearch() {
@@ -532,11 +685,15 @@ function saveCurrentHotelSearch() {
 }
 
 function applySavedHotelSearch(name) {
-  if (!name) return;
+  if (!name) {
+    renderSavedHotelSearches();
+    return;
+  }
   const filters = savedHotelSearches()[name];
   if (!filters) return;
   if (["actual", "weekly_allowance"].includes(filters.payMode)) state.hotelPayMode = filters.payMode;
   setHotelFilterControls(filters);
+  renderSavedHotelSearches(name);
   persistHotelFilters();
   renderHotelView();
 }
@@ -565,6 +722,16 @@ function formatWon(value) {
   return hasNumericValue(value) ? `₩${formatNumber(value)}` : "—";
 }
 
+function formatComparablePay(value, metric = state.payMetric) {
+  const formatted = formatWon(value);
+  if (formatted === "—") return formatted;
+  return metric === "shift_total" ? `${formatted} / shift` : `${formatted}/hr`;
+}
+
+function payMetricLabel(metric = state.payMetric) {
+  return metric === "shift_total" ? "shift total" : "hourly pay";
+}
+
 function svgElement(tag, attributes = {}, text = "") {
   const node = document.createElementNS("http://www.w3.org/2000/svg", tag);
   for (const [name, value] of Object.entries(attributes)) {
@@ -575,20 +742,47 @@ function svgElement(tag, attributes = {}, text = "") {
 }
 
 function hotelPayModeCopy() {
+  const measure = state.payMetric === "shift_total"
+    ? "Shift totals use advertised daily pay where available; otherwise they are scheduled gross estimates before any unpaid break."
+    : "The chart compares work-hour rates, before commute time.";
   if (state.hotelPayMode === "weekly_allowance") {
-    return "Using the published conditional 주휴 rate where stated; hotels without one retain actual pay as a clearly marked fallback. Eligibility is not guaranteed.";
+    return `Using the published conditional 주휴 rate where stated; hotels without one retain actual pay as a clearly marked fallback. ${measure} Eligibility is not guaranteed.`;
   }
-  return "Using actual/base hourly pay. This is the reliable comparison and the ₩12,000 eligibility basis.";
+  return `Using actual/base pay; ${formatWon(configuredHotelMinimumPay())}/hr remains the eligibility basis. ${measure}`;
+}
+
+function configureOverlapControl(control, count, providerBreakdown = []) {
+  if (count <= 1) return;
+  if (!state.groupOverlaps) {
+    control.classList.add("pareto-point-button--exact-stack");
+    return;
+  }
+  control.dataset.count = String(count);
+  if (providerBreakdown.length) {
+    control.classList.add("pareto-point-button--provider-cluster");
+    control.style.setProperty("--cluster-source-ring", providerBreakdownConicGradient(providerBreakdown));
+  }
+}
+
+function syncOverlapToggle(button, hidden) {
+  button.hidden = hidden;
+  button.classList.toggle("is-active", state.groupOverlaps);
+  button.setAttribute("aria-pressed", String(state.groupOverlaps));
 }
 
 function renderHotelChart(hotels) {
-  const points = hotelParetoPoints(hotels, state.hotelPayMode);
+  const providerMode = state.hotelGranularity === "provider";
+  const points = providerMode
+    ? hotelProviderParetoPoints(hotels, state.hotelPayMode, state.payMetric)
+    : hotelParetoPoints(hotels, state.hotelPayMode, state.payMetric);
   state.hotelPointsById = new Map(
-    points.map((point) => [String(point.hotel.hotel_id), point]),
+    points.map((point) => [hotelPointId(point), point]),
   );
   if (!points.length) {
     elements.hotelChart.replaceChildren(
-      createElement("p", "chart-empty", "No verified pay and commute pairs."),
+      createElement("p", "chart-empty", providerMode
+        ? "No provider-specific pay and commute pairs."
+        : "No verified pay and commute pairs."),
       elements.hotelParetoTooltip,
     );
     return;
@@ -615,7 +809,10 @@ function renderHotelChart(hotels) {
   const plot = createElement("div", "pareto-plot");
   const controlsLayer = createElement("div", "pareto-point-controls");
   controlsLayer.setAttribute("role", "group");
-  controlsLayer.setAttribute("aria-label", "Hotel pay and commute data points");
+  controlsLayer.setAttribute(
+    "aria-label",
+    providerMode ? "Hotel provider pay and commute data points" : "Hotel pay and commute data points",
+  );
 
   for (let index = 0; index <= 4; index += 1) {
     const commute = xMin + ((xMax - xMin) * index) / 4;
@@ -629,18 +826,40 @@ function renderHotelChart(hotels) {
   }
   svg.append(
     svgElement("text", { x: margin.left + plotWidth / 2, y: height - 4, class: "chart-axis-title", "text-anchor": "middle" }, "Verified commute (minutes) →"),
-    svgElement("text", { x: 15, y: margin.top + plotHeight / 2, class: "chart-axis-title", transform: `rotate(-90 15 ${margin.top + plotHeight / 2})`, "text-anchor": "middle" }, "Comparable hourly pay →"),
+    svgElement("text", { x: 15, y: margin.top + plotHeight / 2, class: "chart-axis-title", transform: `rotate(-90 15 ${margin.top + plotHeight / 2})`, "text-anchor": "middle" }, state.payMetric === "shift_total" ? "Comparable shift total →" : "Comparable hourly pay →"),
   );
 
   const frontierPoints = points.filter((point) => point.frontier).sort((left, right) => left.commute - right.commute);
-  // The SVG viewBox is commonly scaled down inside the split dashboard pane.
-  // Use a conservative viewBox-space diameter so the 26px HTML hit targets do
-  // not overlap after that scaling and send a click to a neighboring cluster.
-  const clusters = clusterProjectedPoints(
-    points,
-    (point) => ({ x: x(point.commute), y: y(point.pay) }),
-    48,
-  );
+  // Only dots that visually occupy the same position share a chooser. Wider
+  // hit-target overlaps stay independently anchored to their exact data points.
+  const projectPoint = (point) => ({ x: x(point.commute), y: y(point.pay) });
+  const clusters = clusterProjectedPoints(points, projectPoint, PARETO_SHARED_POSITION_DISTANCE);
+  const labelPointIds = new Set();
+  const labelRects = [];
+  const labelCandidates = [...points]
+    .filter((point) => point.frontier || String(point.hotel.hotel_id) === state.selectedHotelId)
+    .sort((left, right) =>
+      Number(String(right.hotel.hotel_id) === state.selectedHotelId) -
+        Number(String(left.hotel.hotel_id) === state.selectedHotelId) ||
+      right.pay - left.pay ||
+      left.commute - right.commute
+    );
+  for (const point of labelCandidates) {
+    const selected = String(point.hotel.hotel_id) === state.selectedHotelId;
+    const base = cleanText(point.hotel.employer).replace(" 서울강남", "").replace(" 서울", "");
+    const provider = point.provider ? ` · ${truncateLabel(point.provider.label, 8)}` : "";
+    const widthEstimate = Math.min(180, 12 + `${base}${provider}`.length * 6);
+    const position = { x: x(point.commute), y: y(point.pay) };
+    const rect = {
+      left: position.x + 8,
+      right: position.x + 8 + widthEstimate,
+      top: position.y - 22,
+      bottom: position.y - 5,
+    };
+    if (!selected && labelRects.some((current) => rectanglesOverlap(rect, current, 2))) continue;
+    labelRects.push(rect);
+    labelPointIds.add(hotelPointId(point));
+  }
   state.hotelPointClusters = new Map();
   if (frontierPoints.length > 1) {
     svg.append(svgElement("polyline", {
@@ -648,48 +867,74 @@ function renderHotelChart(hotels) {
       class: "chart-frontier-line",
     }));
   }
+  const labelsLayer = svgElement("g", {
+    class: "chart-label-layer",
+    "aria-hidden": "true",
+  });
   for (const point of [...points.filter((item) => !item.frontier), ...frontierPoints]) {
     const summary = hotelPointSummary(point);
+    const position = { x: x(point.commute), y: y(point.pay) };
     const classes = ["chart-point"];
+    if (point.provider) classes.push("chart-point--provider");
     if (point.frontier) classes.push("chart-point--frontier");
     if (summary.hotelId === state.selectedHotelId) classes.push("chart-point--selected");
     const group = svgElement("g", {
       class: classes.join(" "),
       "aria-hidden": "true",
-      "data-hotel-visual-id": summary.hotelId,
+      "data-hotel-visual-hotel-id": summary.hotelId,
+      "data-hotel-visual-point-id": hotelPointId(point),
     });
+    if (point.provider?.color) group.style.setProperty("--provider-color", point.provider.color);
     group.append(
-      svgElement("circle", { cx: x(point.commute), cy: y(point.pay), r: point.frontier ? 7 : 4.5, class: "chart-point-dot" }),
+      svgElement("circle", { cx: position.x, cy: position.y, r: point.frontier ? 7 : 4.5, class: "chart-point-dot" }),
     );
     const pointCluster = clusters.find((cluster) => cluster.points.includes(point));
-    if (point.frontier && pointCluster?.points[0] === point) {
+    const clusterLabelPoint = pointCluster?.points.find((candidate) =>
+      String(candidate.hotel.hotel_id) === state.selectedHotelId
+    ) || pointCluster?.points.find((candidate) => labelPointIds.has(hotelPointId(candidate)));
+    if (labelPointIds.has(hotelPointId(point)) && clusterLabelPoint === point) {
       const label = cleanText(point.hotel.employer).replace(" 서울강남", "").replace(" 서울", "");
-      group.append(svgElement("text", { x: x(point.commute) + 10, y: y(point.pay) - 10, class: "chart-point-label" }, label));
+      const providerLabel = point.provider
+        ? ` · ${truncateLabel(point.provider.label, 8)}`
+        : "";
+      labelsLayer.append(svgElement("text", { x: position.x + 10, y: position.y - 10, class: "chart-point-label" }, `${label}${providerLabel}`));
     }
     svg.append(group);
   }
+  svg.append(labelsLayer);
   for (const [index, cluster] of clusters.entries()) {
-    const summaries = cluster.points.map(hotelPointSummary);
-    const selected = summaries.some((summary) => summary.hotelId === state.selectedHotelId);
-    const clusterId = `hotel-${index}`;
-    state.hotelPointClusters.set(clusterId, cluster.points);
+    state.hotelPointClusters.set(`hotel-${index}`, cluster.points);
+  }
+  const pointControls = interactivePointControls(clusters, projectPoint, state.groupOverlaps);
+  for (const layout of pointControls) {
+    const summaries = layout.members.map(hotelPointSummary);
+    const primarySummary = hotelPointSummary(layout.point);
+    const providerBreakdown = hotelPointProviderBreakdown(layout.members, state.hotelPayMode, state.payMetric);
+    const providerSummary = providerBreakdown
+      .map((provider) => `${provider.label} ${provider.pointCount}`)
+      .join(", ");
+    const selected = state.groupOverlaps
+      ? summaries.some((summary) => summary.hotelId === state.selectedHotelId)
+      : primarySummary.hotelId === state.selectedHotelId;
+    const clusterId = `hotel-${layout.clusterIndex}`;
     const control = createElement("button", `pareto-point-button${selected ? " is-selected" : ""}`);
     control.type = "button";
-    control.dataset.hotelPointId = summaries[0].hotelId;
+    control.dataset.hotelPointId = hotelPointId(layout.point);
     control.dataset.pointClusterId = clusterId;
-    control.dataset.hotelPointMembers = summaries.map((summary) => summary.hotelId).join(" ");
-    control.dataset.count = String(summaries.length);
+    control.dataset.hotelPointMembers = layout.members.map(hotelPointId).join(" ");
+    control.dataset.hotelPointHotelIds = summaries.map((summary) => summary.hotelId).join(" ");
+    configureOverlapControl(control, summaries.length, providerBreakdown);
     control.setAttribute("aria-pressed", String(selected));
     control.setAttribute("aria-label", summaries.length === 1
-      ? `Open ${summaries[0].employer}; ${formatWon(summaries[0].pay)} per hour; ${summaries[0].commuteLabel}; ${summaries[0].optionLabel}; ${summaries[0].providerLabel}`
-      : `Choose among ${summaries.length} hotels at this pay and commute position`);
-    control.style.left = `${(cluster.x / width) * 100}%`;
-    control.style.top = `${(cluster.y / height) * 100}%`;
+      ? `Open ${summaries[0].employer}; ${formatComparablePay(summaries[0].pay)}; ${summaries[0].commuteLabel}; ${summaries[0].optionLabel}; ${summaries[0].providerLabel}`
+      : `Open overlap chooser from ${primarySummary.employer}; choose among ${summaries.length} ${providerMode ? "provider offers" : "hotels"}${providerSummary ? `; sources: ${providerSummary}` : ""}`);
+    control.style.left = `${(layout.x / width) * 100}%`;
+    control.style.top = `${(layout.y / height) * 100}%`;
     control.addEventListener("click", (event) => {
       event.stopPropagation();
       hideHotelParetoTooltip();
       if (summaries.length === 1) selectHotel(summaries[0].hotelId, control);
-      else openPointChoices(cluster.points, "hotel");
+      else openPointChoices(layout.members, "hotel");
     });
     controlsLayer.append(control);
   }
@@ -698,7 +943,7 @@ function renderHotelChart(hotels) {
   elements.hotelChart.replaceChildren(plot, elements.hotelParetoTooltip);
   elements.hotelChart.setAttribute(
     "aria-label",
-    `${points.length} hotels plotted by hourly pay and verified commute; ${frontierPoints.length} are on the selected Pareto frontier`,
+    `${points.length} ${providerMode ? "hotel-provider observations" : "hotels"} plotted by ${payMetricLabel()} and verified commute; ${frontierPoints.length} are on the selected Pareto frontier`,
   );
 }
 
@@ -708,7 +953,7 @@ function truncateLabel(value, maximum = 18) {
 }
 
 function renderAlbamonParetoChart() {
-  const points = albamonParetoPoints(state.payload?.jobs || []);
+  const points = albamonParetoPoints(state.payload?.jobs || [], state.payMetric);
   state.paretoPointsById = new Map(
     points.map((point) => [Number(point.job.recruit_no), point]),
   );
@@ -756,15 +1001,12 @@ function renderAlbamonParetoChart() {
   }
   svg.append(
     svgElement("text", { x: margin.left + plotWidth / 2, y: height - 5, class: "chart-axis-title", "text-anchor": "middle" }, "Verified one-way commute (minutes) →"),
-    svgElement("text", { x: 16, y: margin.top + plotHeight / 2, class: "chart-axis-title", transform: `rotate(-90 16 ${margin.top + plotHeight / 2})`, "text-anchor": "middle" }, "Reliable comparable hourly pay →"),
+    svgElement("text", { x: 16, y: margin.top + plotHeight / 2, class: "chart-axis-title", transform: `rotate(-90 16 ${margin.top + plotHeight / 2})`, "text-anchor": "middle" }, state.payMetric === "shift_total" ? "Reliable total pay for one shift →" : "Reliable work-hour equivalent pay →"),
   );
 
   const frontierGroups = albamonFrontierGroups(points);
-  const clusters = clusterProjectedPoints(
-    points,
-    (point) => ({ x: x(point.commute), y: y(point.pay) }),
-    48,
-  );
+  const projectPoint = (point) => ({ x: x(point.commute), y: y(point.pay) });
+  const clusters = clusterProjectedPoints(points, projectPoint, PARETO_SHARED_POSITION_DISTANCE);
   state.albamonPointClusters = new Map();
   for (const [mode, frontier] of frontierGroups) {
     if (mode === "onsite" && frontier.length > 1) {
@@ -776,6 +1018,10 @@ function renderAlbamonParetoChart() {
   }
   const frontierPoints = points.filter((point) => point.frontier);
   const ordered = [...points.filter((point) => !point.frontier), ...frontierPoints];
+  const labelsLayer = svgElement("g", {
+    class: "chart-label-layer",
+    "aria-hidden": "true",
+  });
   for (const [index, point] of ordered.entries()) {
     const summary = albamonPointSummary(point);
     const classes = ["chart-point"];
@@ -793,7 +1039,7 @@ function renderAlbamonParetoChart() {
     const pointCluster = clusters.find((cluster) => cluster.points.includes(point));
     if (point.frontier && pointCluster?.points[0] === point) {
       const direction = index % 2 === 0 ? -1 : 1;
-      group.append(svgElement("text", {
+      labelsLayer.append(svgElement("text", {
         x: x(point.commute) + 10,
         y: y(point.pay) + direction * 12,
         class: "chart-point-label",
@@ -801,28 +1047,35 @@ function renderAlbamonParetoChart() {
     }
     svg.append(group);
   }
+  svg.append(labelsLayer);
   for (const [index, cluster] of clusters.entries()) {
-    const summaries = cluster.points.map(albamonPointSummary);
-    const selected = summaries.some((summary) => summary.recruitNo === state.selectedId);
-    const clusterId = `albamon-${index}`;
-    state.albamonPointClusters.set(clusterId, cluster.points);
+    state.albamonPointClusters.set(`albamon-${index}`, cluster.points);
+  }
+  const pointControls = interactivePointControls(clusters, projectPoint, state.groupOverlaps);
+  for (const layout of pointControls) {
+    const summaries = layout.members.map(albamonPointSummary);
+    const primarySummary = albamonPointSummary(layout.point);
+    const selected = state.groupOverlaps
+      ? summaries.some((summary) => summary.recruitNo === state.selectedId)
+      : primarySummary.recruitNo === state.selectedId;
+    const clusterId = `albamon-${layout.clusterIndex}`;
     const control = createElement("button", `pareto-point-button${selected ? " is-selected" : ""}`);
     control.type = "button";
-    control.dataset.paretoJobId = String(summaries[0].recruitNo);
+    control.dataset.paretoJobId = String(primarySummary.recruitNo);
     control.dataset.pointClusterId = clusterId;
     control.dataset.paretoJobMembers = summaries.map((summary) => summary.recruitNo).join(" ");
-    control.dataset.count = String(summaries.length);
+    configureOverlapControl(control, summaries.length);
     control.setAttribute("aria-pressed", String(selected));
     control.setAttribute("aria-label", summaries.length === 1
-      ? `Open ${summaries[0].title} at ${summaries[0].company}; ${formatWon(summaries[0].pay)} per hour; ${summaries[0].commuteLabel}; ${summaries[0].schedule}`
-      : `Choose among ${summaries.length} jobs at this pay and commute position`);
-    control.style.left = `${(cluster.x / width) * 100}%`;
-    control.style.top = `${(cluster.y / height) * 100}%`;
+      ? `Open ${summaries[0].title} at ${summaries[0].company}; ${formatComparablePay(summaries[0].pay)}; ${summaries[0].commuteLabel}; ${summaries[0].schedule}`
+      : `Open overlap chooser from ${primarySummary.company}; choose among ${summaries.length} jobs`);
+    control.style.left = `${(layout.x / width) * 100}%`;
+    control.style.top = `${(layout.y / height) * 100}%`;
     control.addEventListener("click", (event) => {
       event.stopPropagation();
       hideParetoTooltip();
       if (summaries.length === 1) selectJob(summaries[0].recruitNo, control);
-      else openPointChoices(cluster.points, "albamon");
+      else openPointChoices(layout.members, "albamon");
     });
     controlsLayer.append(control);
   }
@@ -832,7 +1085,7 @@ function renderAlbamonParetoChart() {
   elements.albamonParetoChart.replaceChildren(plot, elements.albamonParetoTooltip);
   elements.albamonParetoChart.setAttribute(
     "aria-label",
-    `${points.length} actionable Albamon jobs plotted by hourly pay and commute; ${frontierCount} are on the Pareto frontier`,
+    `${points.length} actionable Albamon jobs plotted by ${payMetricLabel()} and commute; ${frontierCount} are on the Pareto frontier`,
   );
 }
 
@@ -876,7 +1129,7 @@ function showParetoTooltip(pointElement, pointerEvent = null) {
   );
   const metrics = createElement("div", "pareto-tooltip-metrics");
   metrics.append(
-    createElement("strong", "", `${formatWon(summary.pay)}/hr`),
+    createElement("strong", "", formatComparablePay(summary.pay, summary.payMetric)),
     createElement("strong", "", summary.commuteLabel),
   );
   tooltip.replaceChildren(
@@ -932,56 +1185,86 @@ function positionHotelParetoTooltip(pointElement, pointerEvent = null) {
 }
 
 function showHotelParetoTooltip(pointElement, pointerEvent = null) {
-  const hotelId = String(pointElement?.dataset.hotelPointId || "");
-  const point = state.hotelPointsById.get(hotelId);
+  const pointId = String(pointElement?.dataset.hotelPointId || "");
+  const point = state.hotelPointsById.get(pointId);
   if (!point) return;
   const summary = hotelPointSummary(point);
   const cluster = state.hotelPointClusters.get(pointElement.dataset.pointClusterId) || [point];
   const clusterSummaries = cluster.map(hotelPointSummary);
+  const providerCluster = cluster.some((item) => item.provider);
+  const clusterProviders = hotelPointProviderBreakdown(cluster, state.hotelPayMode, state.payMetric);
   const heading = createElement("div", "pareto-tooltip-heading");
   heading.append(
     badge(summary.frontier ? "Pareto frontier" : "Comparable", summary.frontier ? "pareto" : ""),
-    createElement("span", "pareto-tooltip-area", summary.area),
+    ...(clusterProviders.length
+      ? clusterProviders.map((provider) => providerLegendBadge(provider))
+      : point.provider ? [providerLegendBadge(point.provider)] : []),
+    createElement("span", "pareto-tooltip-area", clusterSummaries.length > 1 ? "Same chart position" : summary.area),
   );
   const metrics = createElement("div", "pareto-tooltip-metrics");
   metrics.append(
-    createElement("strong", "", `${formatWon(summary.pay)}/hr`),
+    createElement("strong", "", formatComparablePay(summary.pay, summary.payMetric)),
     createElement("strong", "", summary.commuteLabel),
   );
   elements.hotelParetoTooltip.replaceChildren(
     heading,
     createElement("strong", "pareto-tooltip-company", clusterSummaries.length > 1
-      ? `${clusterSummaries.length} hotels share this position`
+      ? `${clusterSummaries.length} ${providerCluster ? "provider offers" : "hotels"} share this position`
       : summary.employer),
     metrics,
     createElement("span", "pareto-tooltip-schedule", clusterSummaries.length > 1
-      ? clusterSummaries.map((item) => item.employer).join(" · ")
+      ? clusterSummaries.map((item) => `${item.employer} · ${item.providerLabel}`).join(" · ")
       : `${summary.optionLabel} · ${summary.providerLabel}`),
     createElement("span", "pareto-tooltip-hint", clusterSummaries.length > 1
-      ? "Click to choose the hotel"
+      ? `Click to choose the ${providerCluster ? "provider offer" : "hotel"}`
       : "Click to inspect every shift and provider"),
   );
   elements.hotelParetoTooltip.hidden = false;
-  elements.hotelParetoTooltip.dataset.hotelId = hotelId;
+  elements.hotelParetoTooltip.dataset.hotelId = summary.hotelId;
+  elements.hotelParetoTooltip.dataset.pointId = pointId;
   positionHotelParetoTooltip(pointElement, pointerEvent);
 }
 
 function hideHotelParetoTooltip() {
   elements.hotelParetoTooltip.hidden = true;
   delete elements.hotelParetoTooltip.dataset.hotelId;
+  delete elements.hotelParetoTooltip.dataset.pointId;
 }
 
 function openPointChoices(points, kind) {
   const isHotel = kind === "hotel";
-  elements.pointChoiceTitle.textContent = `Choose one of ${points.length} ${isHotel ? "hotels" : "jobs"}`;
+  const providerChoices = isHotel && points.some((point) => point.provider);
+  elements.pointChoiceTitle.textContent = `Choose one of ${points.length} ${providerChoices ? "provider offers" : isHotel ? "hotels" : "jobs"}`;
+  const providerBreakdown = isHotel ? hotelPointProviderBreakdown(points, state.hotelPayMode, state.payMetric) : [];
+  elements.pointChoiceLegend.hidden = !providerBreakdown.length;
+  elements.pointChoiceLegend.replaceChildren();
+  if (providerBreakdown.length) {
+    elements.pointChoiceLegend.append(createElement("strong", "point-choice-legend-title", "Sources in this group"));
+    for (const provider of providerBreakdown) {
+      const item = providerLegendBadge(provider);
+      item.classList.add("point-choice-source");
+      item.style.setProperty("--provider-color", provider.color || "#73847d");
+      item.append(createElement("span", "point-choice-source-count", String(provider.pointCount)));
+      item.title = `${provider.pointCount} plotted ${provider.label} source point${provider.pointCount === 1 ? "" : "s"}; best ${formatComparablePay(provider.bestPay)}`;
+      elements.pointChoiceLegend.append(item);
+    }
+  }
   const fragment = document.createDocumentFragment();
   for (const point of points) {
     const summary = isHotel ? hotelPointSummary(point) : albamonPointSummary(point);
     const button = createElement("button");
     button.type = "button";
+    const identity = createElement("div", "point-choice-identity");
+    const rowProviders = isHotel ? hotelPointProviderBreakdown([point], state.hotelPayMode, state.payMetric) : [];
+    if (rowProviders.length) {
+      identity.append(...rowProviders.map((provider) => providerLegendBadge(provider)));
+      button.classList.add("point-choice-provider");
+      button.style.setProperty("--provider-color", rowProviders[0].color || "#73847d");
+    }
+    identity.append(createElement("strong", "", isHotel ? summary.employer : summary.title));
     button.append(
-      createElement("strong", "", isHotel ? summary.employer : summary.title),
-      createElement("span", "", `${formatWon(summary.pay)}/hr · ${summary.commuteLabel}`),
+      identity,
+      createElement("span", "", `${formatComparablePay(summary.pay, summary.payMetric)} · ${summary.commuteLabel}`),
       createElement("small", "", isHotel
         ? `${summary.area} · ${summary.optionLabel} · ${summary.providerLabel}`
         : `${summary.company} · ${summary.area} · ${summary.schedule}`),
@@ -997,7 +1280,7 @@ function openPointChoices(points, kind) {
   elements.pointChoiceDialog.showModal();
 }
 
-function mapPointTooltip({ label, labelKind = "", area, heading, title = "", pay, commute, detail, hint }) {
+function mapPointTooltip({ label, labelKind = "", area, heading, title = "", pay, payMetric = "hourly", commute, detail, hint }) {
   const content = createElement("div", "map-point-tooltip");
   const tooltipHeading = createElement("div", "pareto-tooltip-heading");
   tooltipHeading.append(
@@ -1006,7 +1289,7 @@ function mapPointTooltip({ label, labelKind = "", area, heading, title = "", pay
   );
   const metrics = createElement("div", "pareto-tooltip-metrics");
   metrics.append(
-    createElement("strong", "", `${formatWon(pay)}/hr`),
+    createElement("strong", "", formatComparablePay(pay, payMetric)),
     createElement("strong", "", commute),
   );
   content.append(
@@ -1022,8 +1305,10 @@ function mapPointTooltip({ label, labelKind = "", area, heading, title = "", pay
   return content;
 }
 
-function albamonMapTooltip(job) {
-  const summary = albamonPointSummary(albamonPointForJob(job));
+function albamonMapTooltip(job, frontierIds = null) {
+  const point = albamonPointForJob(job, state.payMetric);
+  point.frontier = frontierIds?.has(Number(job.recruit_no)) === true;
+  const summary = albamonPointSummary(point);
   const actionable = job.application_disposition === "apply";
   return mapPointTooltip({
     label: actionable
@@ -1034,24 +1319,51 @@ function albamonMapTooltip(job) {
     heading: summary.company,
     title: summary.title,
     pay: summary.pay,
+    payMetric: summary.payMetric,
     commute: summary.commuteLabel,
     detail: summary.schedule,
     hint: "Click to open full job details",
   });
 }
 
+function hotelProviderTooltipList(hotel) {
+  const providers = hotelProviderComparisons(hotel, state.hotelPayMode, state.payMetric);
+  if (!providers.length) return null;
+  const list = createElement("div", "hotel-provider-tooltip-list");
+  for (const provider of providers) {
+    const row = createElement("div", "hotel-provider-tooltip-row");
+    const swatch = createElement("i", "provider-swatch");
+    swatch.style.setProperty("--provider-color", provider.color);
+    const identity = createElement("span", "hotel-provider-tooltip-name", provider.label);
+    if (provider.usesActualFallback) {
+      identity.append(createElement("small", "", "actual fallback"));
+    }
+    row.append(
+      swatch,
+      identity,
+      createElement("strong", "hotel-provider-tooltip-pay", formatComparablePay(provider.comparablePay)),
+    );
+    list.append(row);
+  }
+  return list;
+}
+
 function hotelMapTooltip(hotel) {
-  const summary = hotelPointSummary(hotelPointForHotel(hotel, state.hotelPayMode));
-  return mapPointTooltip({
-    label: summary.frontier ? "Pareto frontier" : "Comparable",
-    labelKind: summary.frontier ? "pareto" : "",
+  const summary = hotelPointSummary(hotelPointForHotel(hotel, state.hotelPayMode, state.payMetric));
+  const content = mapPointTooltip({
+    label: !summary.pay ? "Pay unavailable" : summary.frontier ? "Pareto frontier" : "Comparable",
+    labelKind: summary.frontier ? "pareto" : !summary.pay ? "warning" : "",
     area: summary.area,
     heading: summary.employer,
     pay: summary.pay,
+    payMetric: summary.payMetric,
     commute: summary.commuteLabel,
-    detail: `${summary.optionLabel} · ${summary.providerLabel}`,
+    detail: summary.optionLabel,
     hint: "Click to inspect every shift and provider",
   });
+  const providers = hotelProviderTooltipList(hotel);
+  if (providers) content.insertBefore(providers, content.lastElementChild);
+  return content;
 }
 
 function richMapTooltipOptions() {
@@ -1067,6 +1379,7 @@ function richMapTooltipOptions() {
 function renderHotelRows(hotels) {
   const rows = hotelRows(hotels, {
     mode: state.hotelPayMode,
+    metric: state.payMetric,
     showAll: true,
   });
   const fragment = document.createDocumentFragment();
@@ -1075,55 +1388,67 @@ function renderHotelRows(hotels) {
     row.dataset.hotelId = hotel.hotel_id;
     row.tabIndex = 0;
     row.setAttribute("aria-label", `Inspect ${hotel.employer}`);
-    if (isHotelOnFrontier(hotel, state.hotelPayMode)) row.classList.add("is-frontier");
+    if (isHotelOnFrontier(hotel, state.hotelPayMode, state.payMetric)) row.classList.add("is-frontier");
     if (String(hotel.hotel_id) === state.selectedHotelId) row.classList.add("is-selected");
     const nameCell = createElement("td", "hotel-name-cell");
     const badges = createElement("div", "badge-row");
-    if (isHotelOnFrontier(hotel, state.hotelPayMode)) badges.append(badge("Frontier", "pareto"));
+    if (isHotelOnFrontier(hotel, state.hotelPayMode, state.payMetric)) badges.append(badge("Frontier", "pareto"));
     if (hotel.source_snapshot_stale) badges.append(badge("Cached source", "warning"));
+    const decision = hotelDecisionSummary(hotel);
+    if (decision.hasLateReturnRisk || decision.reviewPayCount) badges.append(badge("Review details", "warning"));
     nameCell.append(badges, createElement("strong", "", hotel.employer));
-    appendText(nameCell, "small", "", hotel.station || hotel.area || "Location unavailable");
+    appendText(nameCell, "small", "", hotelLocationLabel(hotel));
 
-    const comparableCell = createElement("td");
-    appendText(comparableCell, "strong", "hotel-comparable-pay", formatWon(hotelComparablePay(hotel, state.hotelPayMode)));
+    const comparableCell = createElement("td", "hotel-comparable-cell");
+    comparableCell.dataset.label = state.payMetric === "shift_total" ? "Shift total" : "Work-hour pay";
+    appendText(comparableCell, "strong", "hotel-comparable-pay", formatComparablePay(hotelComparablePay(hotel, state.hotelPayMode, state.payMetric)));
     const comparableBasis = state.hotelPayMode === "weekly_allowance" && hotel.weekly_allowance_rate_stated
       ? "conditional 주휴"
       : state.hotelPayMode === "weekly_allowance" ? "actual fallback" : "actual/base";
-    appendText(comparableCell, "small", "cell-secondary", comparableBasis);
+    appendText(
+      comparableCell,
+      "small",
+      "cell-secondary",
+      `${comparableBasis}${state.payMetric === "shift_total" ? " · advertised or scheduled gross" : ""}`,
+    );
+    appendText(
+      comparableCell,
+      "small",
+      "cell-secondary",
+      decision.adjustedHourly
+        ? `${formatWon(decision.adjustedHourly)}/hr door-to-door`
+        : "Door-to-door rate unavailable",
+    );
 
-    const payCell = createElement("td");
-    appendText(payCell, "strong", "", formatWon(hotel.actual_hourly_max));
-    appendText(payCell, "small", "cell-secondary", `주휴* ${formatWon(hotel.weekly_allowance_hourly_max)}`);
+    const payCell = createElement("td", "hotel-pay-cell");
+    payCell.dataset.label = "Actual / 주휴*";
+    appendText(payCell, "strong", "", formatComparablePay(hotel.actual_hourly_max, "hourly"));
+    appendText(payCell, "small", "cell-secondary", `주휴* ${formatComparablePay(hotel.weekly_allowance_hourly_max, "hourly")}`);
+    appendText(
+      payCell,
+      "small",
+      "cell-secondary",
+      hotel.actual_shift_total_max
+        ? `Best shift ${formatWon(hotel.actual_shift_total_max)}${hotel.shift_total_includes_scheduled_estimates ? " · scheduled gross estimate" : ""}`
+        : "Shift total unavailable",
+    );
 
-    const commuteCell = createElement("td");
-    appendText(commuteCell, "strong", "commute-value", `${hotel.transit_minutes} min`);
-    appendText(commuteCell, "small", "cell-secondary", "verified transit");
+    const commuteCell = createElement("td", "hotel-commute-cell");
+    commuteCell.dataset.label = "Commute";
+    const commute = hotelVerifiedCommuteMinutes(hotel.transit_minutes);
+    appendText(commuteCell, "strong", "commute-value", commute === null ? "—" : `${commute} min`);
+    appendText(commuteCell, "small", "cell-secondary", commute === null ? "route not verified" : "verified transit");
 
-    const optionsCell = createElement("td");
-    const decision = hotelDecisionSummary(hotel);
+    const optionsCell = createElement("td", "hotel-options-cell");
+    optionsCell.dataset.label = "Available shifts";
     appendText(optionsCell, "strong", "", `${hotel.date_count} days · ${hotel.shift_count} times`);
     const providers = (hotel.providers || []).map((provider) => provider.label).join(" · ") || "Provider unavailable";
     appendText(optionsCell, "small", "cell-secondary", `${hotel.job_count} choices · ${providers}`);
-    if (decision.estimatedEarnings) {
-      appendText(
-        optionsCell,
-        "small",
-        "cell-secondary",
-        `${formatWon(decision.estimatedEarnings)} shift · ${formatWon(decision.adjustedHourly)}/hr after round-trip commute`,
-      );
-    }
-    if (decision.hasLateReturnRisk || decision.reviewPayCount) {
-      appendText(
-        optionsCell,
-        "small",
-        "cell-warning",
-        [decision.hasLateReturnRisk ? "late-return check" : "", decision.reviewPayCount ? `${decision.reviewPayCount} pay derivation check` : ""].filter(Boolean).join(" · "),
-      );
-    }
     row.append(nameCell, comparableCell, payCell, commuteCell, optionsCell);
     fragment.append(row);
   }
   elements.hotelRows.replaceChildren(fragment);
+  elements.hotelComparableHeading.textContent = state.payMetric === "shift_total" ? "Shift total" : "Work-hour pay";
   elements.hotelEmpty.hidden = rows.length > 0;
   elements.hotelTableHeading.textContent = "All matching hotels";
   elements.hotelTableFeedback.textContent = `${rows.length} of ${hotels.length} aggregated hotels · updated ${formatDateTime(state.hotelPayload.generated_at)}`;
@@ -1250,18 +1575,73 @@ function renderSourceHealth(items = []) {
   if (!items.length) elements.hotelSourceHealth.append(createElement("p", "", "No source diagnostics were published with this report."));
 }
 
+function renderHotelVisualizationLegends(hotels) {
+  const providers = mergedHotelProviderComparisons(hotels, state.hotelPayMode, state.payMetric);
+  const providerItems = providers.map((provider) => providerLegendItem(provider));
+  const frontierItem = createElement("span", "");
+  frontierItem.append(createElement("i", "dot dot--frontier"), document.createTextNode("Frontier halo"));
+  if (state.hotelGranularity === "provider") {
+    elements.hotelChartLegend.replaceChildren(...providerItems, frontierItem);
+  } else {
+    const comparable = createElement("span", "");
+    comparable.append(createElement("i", "dot dot--ready"), document.createTextNode("Aggregated hotel"));
+    elements.hotelChartLegend.replaceChildren(comparable, frontierItem);
+  }
+
+  const mapItems = providers.map((provider) => providerLegendItem(provider));
+  const encoding = createElement("span", "");
+  encoding.append(
+    createElement("i", "provider-best-key"),
+    document.createTextNode(state.hotelGranularity === "provider"
+      ? "Each dot = provider"
+      : "Center = highest rate"),
+  );
+  const selected = createElement("span", "");
+  selected.append(createElement("i", "provider-selected-key"), document.createTextNode("Selected"));
+  const frontierToggle = markerLegendToggle(
+    "Frontier hotels",
+    "dot--frontier",
+    state.hotelMarkerVisibility.frontier,
+    () => setHotelMarkerVisibility("frontier", !state.hotelMarkerVisibility.frontier),
+  );
+  const comparableToggle = markerLegendToggle(
+    state.payMetric === "shift_total" ? "Other / total unavailable" : "Other hotels",
+    "dot--muted",
+    state.hotelMarkerVisibility.comparable,
+    () => setHotelMarkerVisibility("comparable", !state.hotelMarkerVisibility.comparable),
+  );
+  elements.hotelMapLegend.replaceChildren(...mapItems, encoding, frontierToggle, comparableToggle, selected);
+}
+
 function syncHotelVisualization() {
   const showingMap = state.hotelVisualization === "map";
+  const providerMode = state.hotelGranularity === "provider";
+  elements.hotelGranularityHotel.classList.toggle("is-active", !providerMode);
+  elements.hotelGranularityHotel.setAttribute("aria-pressed", String(!providerMode));
+  elements.hotelGranularityProvider.classList.toggle("is-active", providerMode);
+  elements.hotelGranularityProvider.setAttribute("aria-pressed", String(providerMode));
   elements.hotelMapVisual.classList.toggle("is-active", showingMap);
   elements.hotelMapVisual.setAttribute("aria-pressed", String(showingMap));
   elements.hotelParetoVisual.classList.toggle("is-active", !showingMap);
   elements.hotelParetoVisual.setAttribute("aria-pressed", String(!showingMap));
+  syncOverlapToggle(elements.hotelGroupOverlaps, showingMap);
   elements.hotelChartLegend.hidden = showingMap;
   elements.hotelMapLegend.hidden = !showingMap;
-  elements.hotelVisualTitle.textContent = showingMap ? "Hotel locations" : "Pay versus commute";
-  elements.hotelVisualDescription.textContent = showingMap
-    ? "Hover for hotel and commute; click a marker to inspect every shift and provider."
-    : "Hover for a summary; click any point to inspect every shift and provider.";
+  elements.hotelVisualTitle.textContent = showingMap
+    ? providerMode ? "Hotel provider locations" : "Hotel locations"
+    : providerMode ? `Provider ${payMetricLabel()} versus commute` : `Hotel ${payMetricLabel()} versus commute`;
+  const visualDescription = showingMap
+    ? providerMode
+      ? "Each colored dot is a provider at the hotel's true location. Labels reveal progressively with zoom."
+      : "Ring slices are providers; the center marks the highest shown rate. Labels reveal progressively with zoom."
+    : providerMode
+      ? state.groupOverlaps
+        ? "Each hotel-provider rate is a separate observation; visually coincident points share a numbered source ring. Hover or click to inspect the group."
+        : "Every dot stays on its exact pay and commute coordinates. Clicking an overlap still opens the chooser, without a numbered badge."
+      : state.groupOverlaps
+        ? "Each point uses the hotel's best shown rate; visually coincident hotels share a numbered source ring. Hover or click to inspect the group."
+        : "Every hotel dot stays on its exact pay and commute coordinates. Clicking an overlap still opens the chooser, without a numbered badge.";
+  elements.hotelVisualDescription.textContent = visualDescription;
   elements.hotelChart.hidden = showingMap;
   if (!showingMap) {
     elements.hotelMap.hidden = true;
@@ -1287,19 +1667,105 @@ function setHotelVisualization(mode) {
   syncHotelVisualization();
 }
 
+function setHotelGranularity(mode) {
+  const next = mode === "provider" ? "provider" : "hotel";
+  if (state.hotelGranularity === next) return;
+  state.hotelGranularity = next;
+  hideHotelParetoTooltip();
+  persistHotelFilters();
+  renderHotelView();
+}
+
+function setGroupOverlaps(enabled) {
+  const next = enabled === true;
+  if (state.groupOverlaps === next) return;
+  state.groupOverlaps = next;
+  hideHotelParetoTooltip();
+  hideParetoTooltip();
+  persistVisualizationPreferences();
+  if (state.payload) syncWorksiteVisualization();
+  if (state.hotelPayload) syncHotelVisualization();
+}
+
+function syncPayMetricControls() {
+  for (const [button, active] of [
+    [elements.albamonPayHourly, state.payMetric === "hourly"],
+    [elements.albamonPayTotal, state.payMetric === "shift_total"],
+    [elements.hotelPayHourly, state.payMetric === "hourly"],
+    [elements.hotelPayTotal, state.payMetric === "shift_total"],
+  ]) {
+    button.classList.toggle("is-active", active);
+    button.setAttribute("aria-pressed", String(active));
+  }
+}
+
+function setPayMetric(metric) {
+  const next = metric === "shift_total" ? "shift_total" : "hourly";
+  if (state.payMetric === next) return;
+  state.payMetric = next;
+  hideHotelParetoTooltip();
+  hideParetoTooltip();
+  persistVisualizationPreferences();
+  syncPayMetricControls();
+  if (state.payload) {
+    renderResults();
+    syncWorksiteVisualization();
+  }
+  if (state.hotelPayload) renderHotelView();
+}
+
+function syncAlbamonMarkerToggles() {
+  for (const [button, active] of [
+    [elements.albamonMarkerActionable, state.albamonMarkerVisibility.actionable],
+    [elements.albamonMarkerOther, state.albamonMarkerVisibility.other],
+  ]) {
+    button.classList.toggle("is-active", active);
+    button.setAttribute("aria-pressed", String(active));
+  }
+}
+
+function setAlbamonMarkerVisibility(category, visible) {
+  if (!Object.hasOwn(state.albamonMarkerVisibility, category)) return;
+  state.albamonMarkerVisibility[category] = visible === true;
+  persistVisualizationPreferences();
+  syncAlbamonMarkerToggles();
+  renderMapMarkers();
+}
+
+function setHotelMarkerVisibility(category, visible) {
+  if (!Object.hasOwn(state.hotelMarkerVisibility, category)) return;
+  state.hotelMarkerVisibility[category] = visible === true;
+  persistVisualizationPreferences();
+  renderHotelVisualizationLegends(state.filteredHotels);
+  renderHotelMapMarkers();
+}
+
 function renderHotelView() {
   const payload = state.hotelPayload;
   if (!payload) return;
+  syncConfiguredHotelMinimumPay();
   populateHotelFilterOptions(payload.hotels || []);
   const hotels = filterHotels(payload.hotels || [], hotelFilterControls());
   state.filteredHotels = hotels;
+  renderHotelVisualizationLegends(hotels);
   if (state.selectedHotelId && !hotels.some((hotel) => String(hotel.hotel_id) === state.selectedHotelId)) closeDrawer();
-  const frontier = hotels.filter((hotel) => isHotelOnFrontier(hotel, state.hotelPayMode));
-  const highestPay = Math.max(0, ...frontier.map((hotel) => hotelComparablePay(hotel, state.hotelPayMode) || 0));
-  elements.hotelSummaryTotal.textContent = formatNumber(hotels.length);
+  const frontier = state.hotelGranularity === "provider"
+    ? hotelProviderParetoPoints(hotels, state.hotelPayMode, state.payMetric).filter((point) => point.frontier)
+    : hotels.filter((hotel) => isHotelOnFrontier(hotel, state.hotelPayMode, state.payMetric));
+  const highestPay = Math.max(0, ...frontier.map((item) =>
+    item.hotel ? item.pay : hotelComparablePay(item, state.hotelPayMode, state.payMetric) || 0
+  ));
+  const verifiedCommutes = hotels
+    .map((hotel) => hotelVerifiedCommuteMinutes(hotel.transit_minutes))
+    .filter((minutes) => minutes !== null);
   elements.hotelSummaryFrontier.textContent = formatNumber(frontier.length);
-  elements.hotelSummaryPay.textContent = formatWon(highestPay);
-  elements.hotelSummaryWeekly.textContent = formatNumber(hotels.filter((hotel) => hotel.weekly_allowance_rate_stated).length);
+  elements.hotelSummaryPay.textContent = formatComparablePay(highestPay);
+  elements.hotelSummaryPayLabel.textContent = state.payMetric === "shift_total"
+    ? "Highest frontier shift total"
+    : "Highest frontier hourly";
+  elements.hotelSummaryCommute.textContent = verifiedCommutes.length
+    ? `${Math.min(...verifiedCommutes)} min`
+    : "—";
   elements.refreshState.textContent = `Hotel report refreshed ${formatDateTime(payload.generated_at)}`;
   renderOriginControl(payload.origin);
   const searchDates = payload.policy?.search_dates || payload.policy?.weekend_dates || [];
@@ -1307,17 +1773,11 @@ function renderHotelView() {
     ? `Exploring ${searchDates[0] || "?"} through ${searchDates.at(-1) || "?"} across all weekdays and shifts. This does not change Discord.`
     : `Showing the monitored report for ${(payload.monitored_dates || []).join(", ")}. Expired dates are hidden.`;
   elements.hotelBasisNote.textContent = hotelPayModeCopy();
+  syncPayMetricControls();
   elements.hotelPayActual.classList.toggle("is-active", state.hotelPayMode === "actual");
   elements.hotelPayActual.setAttribute("aria-pressed", String(state.hotelPayMode === "actual"));
   elements.hotelPayWeekly.classList.toggle("is-active", state.hotelPayMode === "weekly_allowance");
   elements.hotelPayWeekly.setAttribute("aria-pressed", String(state.hotelPayMode === "weekly_allowance"));
-  elements.reportLinks.replaceChildren(...(payload.reports || []).map((report) => {
-    const link = createElement("a", "", report.label);
-    link.href = report.url;
-    link.download = "";
-    return link;
-  }));
-
   const degraded = Object.entries(payload.sources || {}).filter(([, source]) => source.status !== "live");
   elements.hotelSourceWarning.hidden = degraded.length === 0 && payload.integrity_checks_passed;
   if (!elements.hotelSourceWarning.hidden) {
@@ -1330,7 +1790,9 @@ function renderHotelView() {
       : `Integrity checks did not pass. ${sourceText}`;
   }
   syncHotelVisualization();
+  syncHotelMobileView();
   renderHotelRows(hotels);
+  updateHotelFilterSummary();
   elements.hotelFilterFeedback.textContent = `${hotels.length} of ${payload.hotels?.length || 0} hotels · ${hotels.reduce((sum, hotel) => sum + Number(hotel.job_count || 0), 0)} matching shift options. Filters apply to table, map, and frontier.`;
   renderAgencyCatalog(
     payload.agency_catalog || [],
@@ -1432,6 +1894,7 @@ function setDesk(view) {
   elements.albamonDeskTab.setAttribute("aria-selected", String(!hotelsActive));
   elements.hotelsDeskTab.classList.toggle("is-active", hotelsActive);
   elements.hotelsDeskTab.setAttribute("aria-selected", String(hotelsActive));
+  elements.reportLinks.hidden = hotelsActive;
   if (hotelsActive) {
     elements.compareTray.hidden = true;
     document.querySelector(".skip-link").href = "#hotel-table-heading";
@@ -1445,28 +1908,38 @@ function setDesk(view) {
 
 function syncWorksiteVisualization() {
   if (!state.payload) return;
+  syncPayMetricControls();
+  syncAlbamonMarkerToggles();
   const showingPareto = state.albamonVisualization === "pareto";
   elements.albamonMapVisual.classList.toggle("is-active", !showingPareto);
   elements.albamonMapVisual.setAttribute("aria-pressed", String(!showingPareto));
   elements.albamonParetoVisual.classList.toggle("is-active", showingPareto);
   elements.albamonParetoVisual.setAttribute("aria-pressed", String(showingPareto));
+  syncOverlapToggle(elements.albamonGroupOverlaps, !showingPareto);
   elements.mapLegend.hidden = showingPareto;
   elements.albamonChartLegend.hidden = !showingPareto;
   elements.albamonParetoChart.hidden = !showingPareto;
 
   if (showingPareto) {
+    const currentPoints = albamonParetoPoints(state.payload.jobs || [], state.payMetric);
+    const frontierCount = currentPoints.filter((point) => point.frontier).length;
     elements.map.hidden = true;
     elements.mapFallback.hidden = true;
     elements.visualizationEyebrow.textContent = "PAY ↑ · COMMUTE ↓";
-    elements.mapHeading.textContent = `${formatNumber(state.payload.summary.pareto_frontier_count || 0)} unbeaten choices`;
-    elements.visualizationCaption.textContent = "Every point is actionable with reliable comparable pay and verified commute. Gold choices are not beaten on both axes; remote roles are compared separately at 0 minutes.";
+    elements.mapHeading.textContent = `${formatNumber(frontierCount)} unbeaten choices by ${payMetricLabel()}`;
+    const basis = state.payMetric === "shift_total"
+      ? "Only jobs with a verified total for one shift are plotted."
+      : "The y-axis uses reliable work-hour equivalent pay.";
+    elements.visualizationCaption.textContent = state.groupOverlaps
+      ? `${basis} Every dot uses exact pay and commute coordinates; numbered groups only combine visually coincident hit targets. Remote roles are compared separately at 0 minutes.`
+      : `${basis} Number badges are hidden; clicking an exact overlap still opens its chooser.`;
     renderAlbamonParetoChart();
     return;
   }
 
   elements.visualizationEyebrow.textContent = "WORKSITE MAP";
   elements.mapHeading.textContent = `From ${state.payload.origin.name}`;
-  elements.visualizationCaption.textContent = "Markers use Albamon’s actual worksite coordinates. Commute eligibility uses verified public transport—not straight-line distance.";
+  elements.visualizationCaption.textContent = `Markers use actual worksite coordinates and show ${payMetricLabel()} in their details. Legend buttons can hide actionable or other matching statuses.`;
   elements.map.hidden = !state.map;
   elements.mapFallback.hidden = Boolean(state.map);
   renderMapMarkers();
@@ -1719,6 +2192,7 @@ function filterJobs() {
     state.shortlistOnly,
   );
   elements.resultsEyebrow.textContent = "RANKED RESULTS";
+  updateAlbamonFilterSummary();
   syncQueueCardSelection();
   renderResults();
   syncWorksiteVisualization();
@@ -1726,6 +2200,60 @@ function filterJobs() {
 
 function badge(text, variant = "") {
   return createElement("span", `badge${variant ? ` badge--${variant}` : ""}`, text);
+}
+
+function appendLimitedBadges(container, specs, maximum = 3) {
+  const items = specs.filter(Boolean);
+  const visible = items.length > maximum ? items.slice(0, maximum - 1) : items;
+  for (const item of visible) container.append(badge(item.text, item.variant));
+  if (items.length > maximum) {
+    const overflow = badge(`+${items.length - maximum + 1}`);
+    overflow.title = items.slice(maximum - 1).map((item) => item.text).join(" · ");
+    overflow.setAttribute("aria-label", `Also: ${overflow.title}`);
+    container.append(overflow);
+  }
+}
+
+function jobBadgeSpecs(job) {
+  const specs = [];
+  if (job.needs_review_reason === "verify_requirements") specs.push({ text: "Check condition", variant: "warning" });
+  else if (job.needs_review_reason === "deferred") specs.push({ text: "Deferred", variant: "warning" });
+  else if (job.review_resolution_status === "requirements_verified") specs.push({ text: "Check complete", variant: "evidence" });
+  else if ((job.hard_requirements || []).length > 0) specs.push({ text: "Requirements", variant: "warning" });
+  if (job.is_new) specs.push({ text: "New", variant: "new" });
+  if (job.pareto_frontier) specs.push({ text: "Pareto", variant: "pareto" });
+  if (job.is_closing_soon) specs.push({ text: "Closing soon", variant: "warning" });
+  if ((job.eligibility_lanes || []).includes("remote_short_term")) specs.push({ text: "Remote", variant: "evidence" });
+  else if ((job.eligibility_lanes || []).includes("songpa_late_night")) specs.push({ text: "Station evening", variant: "evidence" });
+  else if (job.weekend_evidence_type === "exact") specs.push({ text: "Exact weekend", variant: "evidence" });
+  else if (job.weekend_evidence_type === "negotiable") specs.push({ text: "Weekend flexible", variant: "" });
+  if (job.pay_adjusted_commute) specs.push({ text: "Premium commute", variant: "warning" });
+  if (job.application_disposition === "applied") specs.push({ text: "History", variant: "applied" });
+  return specs;
+}
+
+function providerLegendBadge(provider) {
+  const item = createElement("span", "provider-legend-badge");
+  const swatch = createElement("i", "provider-swatch");
+  swatch.style.setProperty("--provider-color", provider.color || "#73847d");
+  item.append(swatch, createElement("span", "", provider.label || provider.agency || "Provider"));
+  return item;
+}
+
+function providerLegendItem(provider, { includePay = true } = {}) {
+  const item = providerLegendBadge(provider);
+  if (includePay) item.append(createElement("strong", "", formatComparablePay(provider.comparablePay)));
+  item.title = `${provider.label}: best visible ${formatComparablePay(provider.comparablePay)} across ${provider.hotelCount || 1} hotel${provider.hotelCount === 1 ? "" : "s"}`;
+  return item;
+}
+
+function markerLegendToggle(label, dotClass, active, onClick) {
+  const button = createElement("button", `legend-toggle${active ? " is-active" : ""}`);
+  button.type = "button";
+  button.setAttribute("aria-pressed", String(active));
+  button.append(createElement("i", `dot ${dotClass}`), document.createTextNode(label));
+  button.addEventListener("click", onClick);
+  return button;
 }
 
 function setCompareButtonState(button, job, selected) {
@@ -1763,39 +2291,43 @@ function renderResults() {
 
     const jobCell = createElement("td", "job-cell");
     const badges = createElement("div", "badge-row");
-    if (job.is_new) badges.append(badge("New", "new"));
-    if (job.pareto_frontier) badges.append(badge("Pareto", "pareto"));
-    if (job.is_closing_soon) badges.append(badge("Closing soon", "warning"));
-    if (job.application_disposition === "applied") badges.append(badge("History", "applied"));
-    if (job.weekend_evidence_type === "exact") badges.append(badge("Exact weekend", "evidence"));
-    if (job.weekend_evidence_type === "negotiable") badges.append(badge("Weekend flexible"));
-    if ((job.eligibility_lanes || []).includes("remote_short_term")) badges.append(badge("Remote", "evidence"));
-    if (job.availability_end_date) badges.append(badge(`Ends by ${job.availability_end_date.slice(5)}`, "evidence"));
-    if ((job.eligibility_lanes || []).includes("aug_15_17_single_day")) badges.append(badge("Aug 15/17 one day", "evidence"));
-    if ((job.eligibility_lanes || []).includes("songpa_late_night")) badges.append(badge("Station evening", "evidence"));
-    if (job.pay_adjusted_commute) badges.append(badge("Premium commute", "warning"));
-    if (job.needs_review_reason === "verify_requirements") {
-      badges.append(badge("Check posting condition", "warning"));
-    } else if (job.review_resolution_status === "requirements_verified") {
-      badges.append(badge("Condition check complete", "evidence"));
-    } else if ((job.hard_requirements || []).length > 0) {
-      badges.append(badge("Requirements", "warning"));
-    }
-    if (job.needs_review_reason === "deferred") badges.append(badge("Deferred review", "warning"));
+    appendLimitedBadges(badges, jobBadgeSpecs(job));
     if (badges.childElementCount) jobCell.append(badges);
     appendText(jobCell, "strong", "", job.title || "Untitled job");
     appendText(jobCell, "small", "", `${job.company || "Unknown company"} · ${job.target_district || job.area || "Area unknown"}`);
-    if (job.review_reason_summary) {
-      appendText(jobCell, "small", "review-reason", `Review: ${job.review_reason_summary}`);
-    }
     row.append(jobCell);
 
-    const payCell = createElement("td");
-    appendText(payCell, "span", "pay-value", `₩${formatNumber(job.comparable_hourly_pay)}/hr`);
+    const payCell = createElement("td", "job-pay-cell");
+    payCell.dataset.label = "Pay";
+    appendText(
+      payCell,
+      "span",
+      "pay-value",
+      hasNumericValue(job.work_hourly_pay)
+        ? `₩${formatNumber(job.work_hourly_pay)}/hr work`
+        : "Work-hour rate unverified",
+    );
+    appendText(
+      payCell,
+      "span",
+      "cell-secondary",
+      hasNumericValue(job.door_to_door_hourly_pay)
+        ? `₩${formatNumber(job.door_to_door_hourly_pay)}/hr door-to-door`
+        : "Door-to-door rate unavailable",
+    );
+    appendText(
+      payCell,
+      "span",
+      "cell-secondary",
+      hasNumericValue(job.estimated_shift_earnings_won)
+        ? `${formatWon(job.estimated_shift_earnings_won)} total for the verified shift`
+        : "Shift total unavailable",
+    );
     appendText(payCell, "span", "cell-secondary", `${job.salary_type || "Pay"} ${job.salary || "not stated"}`);
     row.append(payCell);
 
-    const scheduleCell = createElement("td");
+    const scheduleCell = createElement("td", "job-schedule-cell");
+    scheduleCell.dataset.label = "Schedule";
     appendText(scheduleCell, "span", "", job.work_days || "Schedule check");
     appendText(
       scheduleCell,
@@ -1809,7 +2341,8 @@ function renderResults() {
     );
     row.append(scheduleCell);
 
-    const commuteCell = createElement("td");
+    const commuteCell = createElement("td", "job-commute-cell");
+    commuteCell.dataset.label = "Commute";
     appendText(
       commuteCell,
       "span",
@@ -1836,7 +2369,8 @@ function renderResults() {
     );
     row.append(commuteCell);
 
-    const statusCell = createElement("td");
+    const statusCell = createElement("td", "job-decision-cell");
+    statusCell.dataset.label = "Decision";
     statusCell.append(createElement("span", `status-pill status-pill--${job.application_disposition}`, STATUS_LABELS[job.application_disposition] || job.application_disposition));
     appendText(statusCell, "span", "cell-secondary", `Tier ${job.utility_tier || "—"} · #${job.utility_rank || "—"}`);
     row.append(statusCell);
@@ -1925,7 +2459,18 @@ function openComparison() {
     appendText(card, "h3", "", job.title);
     appendText(card, "p", "comparison-company", `${job.company} · ${job.target_district || job.area || "Area unknown"}`);
     card.append(
-      comparisonFact("Comparable pay", `₩${formatNumber(job.comparable_hourly_pay)}/hr`),
+      comparisonFact(
+        "Work-hour equivalent",
+        hasNumericValue(job.work_hourly_pay) ? `₩${formatNumber(job.work_hourly_pay)}/hr` : "Unverified",
+      ),
+      comparisonFact(
+        "Door-to-door rate",
+        hasNumericValue(job.door_to_door_hourly_pay) ? `₩${formatNumber(job.door_to_door_hourly_pay)}/hr` : "Unavailable",
+      ),
+      comparisonFact(
+        "Total shift pay",
+        hasNumericValue(job.estimated_shift_earnings_won) ? formatWon(job.estimated_shift_earnings_won) : "Unavailable",
+      ),
       comparisonFact("Verified commute", job.remote_job ? "No commute · remote" : hasNumericValue(job.transit_minutes) ? `${job.transit_minutes} min · ${job.transit_transfers ?? "?"} transfer(s)` : "Unverified"),
       comparisonFact("Priority zone", job.search_zone_label || "Outer Seoul"),
       comparisonFact("Commute policy", job.commute_policy_reason || `Up to ${job.commute_limit_minutes || 50} min`),
@@ -2001,14 +2546,17 @@ function updateHotelSelection(previousId, nextId) {
     const selected = String(hotelId) === String(nextId || "");
     const row = elements.hotelRows.querySelector(`[data-hotel-id="${hotelId}"]`);
     if (row) row.classList.toggle("is-selected", selected);
-    const control = [...elements.hotelChart.querySelectorAll("[data-hotel-point-members]")]
-      .find((candidate) => (candidate.dataset.hotelPointMembers || "").split(" ").includes(String(hotelId)));
-    if (control) {
+    const controls = [...elements.hotelChart.querySelectorAll("[data-hotel-point-hotel-ids]")]
+      .filter((candidate) => (candidate.dataset.hotelPointHotelIds || "").split(" ").includes(String(hotelId)));
+    for (const control of controls) {
       control.classList.toggle("is-selected", selected);
       control.setAttribute("aria-pressed", String(selected));
     }
-    const visualPoint = elements.hotelChart.querySelector(`[data-hotel-visual-id="${hotelId}"]`);
-    if (visualPoint) visualPoint.classList.toggle("chart-point--selected", selected);
+    const visualPoints = [...elements.hotelChart.querySelectorAll("[data-hotel-visual-hotel-id]")]
+      .filter((candidate) => candidate.dataset.hotelVisualHotelId === String(hotelId));
+    for (const visualPoint of visualPoints) {
+      visualPoint.classList.toggle("chart-point--selected", selected);
+    }
   }
   if (state.hotelVisualization === "map" && state.hotelMap) renderHotelMapMarkers();
 }
@@ -2021,6 +2569,22 @@ function markerIcon(job, selected) {
     html: `<div class="map-marker${selectedClass}${mutedClass}"><span>${selected ? "●" : ""}</span></div>`,
     iconSize: selected ? [30, 30] : [24, 24],
     iconAnchor: selected ? [8, 27] : [6, 21],
+  });
+}
+
+function visibleAlbamonMapJobs() {
+  return state.filteredJobs.filter((job) => {
+    const category = job.application_disposition === "apply" ? "actionable" : "other";
+    return state.albamonMarkerVisibility[category] && hasPlausibleMapLocation(job);
+  });
+}
+
+function visibleHotelMapHotels() {
+  return state.filteredHotels.filter((hotel) => {
+    const category = isHotelOnFrontier(hotel, state.hotelPayMode, state.payMetric)
+      ? "frontier"
+      : "comparable";
+    return state.hotelMarkerVisibility[category] && hasPlausibleMapLocation(hotel);
   });
 }
 
@@ -2042,9 +2606,17 @@ function mapClusterTooltip(items, kind) {
   const list = createElement("ul", "detail-list");
   for (const item of items.slice(0, 6)) {
     const pay = kind === "hotel"
-      ? hotelComparablePay(item, state.hotelPayMode)
-      : Number(item.comparable_hourly_pay) || 0;
-    appendText(list, "li", "", `${item.employer || item.company || item.title} · ${formatWon(pay)}/hr · ${item.transit_minutes ?? "?"} min`);
+      ? hotelComparablePay(item, state.hotelPayMode, state.payMetric)
+      : Number(state.payMetric === "shift_total" ? item.estimated_shift_earnings_won : item.comparable_hourly_pay) || 0;
+    const provider = kind === "hotel"
+      ? hotelProviderComparisons(item, state.hotelPayMode, state.payMetric)[0]
+      : null;
+    appendText(
+      list,
+      "li",
+      "",
+      `${item.employer || item.company || item.title} · ${formatComparablePay(pay)} · ${item.transit_minutes ?? "?"} min${provider ? ` · ${provider.label}` : ""}`,
+    );
   }
   if (items.length > 6) appendText(list, "li", "", `+ ${items.length - 6} more`);
   content.append(list, createElement("span", "pareto-tooltip-hint", "Click to choose a result"));
@@ -2165,7 +2737,7 @@ function initializeMap() {
 function fitAlbamonMap() {
   if (!state.map || !state.payload || elements.map.hidden) return;
   const bounds = [[state.payload.origin.latitude, state.payload.origin.longitude]];
-  for (const job of state.filteredJobs.filter(hasPlausibleMapLocation)) {
+  for (const job of visibleAlbamonMapJobs()) {
     bounds.push([Number(job.latitude), Number(job.longitude)]);
   }
   if (bounds.length > 1) state.map.fitBounds(bounds, { padding: [28, 28], maxZoom: 13 });
@@ -2179,7 +2751,12 @@ function renderMapMarkers() {
   for (const marker of new Set(state.markers.values())) marker.remove();
   state.markers.clear();
   const groups = new Map();
-  for (const job of state.filteredJobs.filter(hasPlausibleMapLocation)) {
+  const frontierIds = new Set(
+    albamonParetoPoints(state.filteredJobs, state.payMetric)
+      .filter((point) => point.frontier)
+      .map((point) => Number(point.job.recruit_no)),
+  );
+  for (const job of visibleAlbamonMapJobs()) {
     const key = `${Number(job.latitude).toFixed(5)},${Number(job.longitude).toFixed(5)}`;
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push(job);
@@ -2188,30 +2765,56 @@ function renderMapMarkers() {
     const first = jobs[0];
     const selected = jobs.some((job) => Number(job.recruit_no) === state.selectedId);
     const marker = window.L.marker([Number(first.latitude), Number(first.longitude)], {
-      icon: jobs.length === 1 ? markerIcon(first, selected) : clusteredMarkerIcon(jobs.length, selected, jobs.some((job) => job.pareto_frontier)),
+      icon: jobs.length === 1 ? markerIcon(first, selected) : clusteredMarkerIcon(jobs.length, selected, jobs.some((job) => frontierIds.has(Number(job.recruit_no)))),
       zIndexOffset: selected ? 1000 : 0,
       title: jobs.length === 1 ? `${first.company} — ${first.title}` : `${jobs.length} jobs at this worksite`,
     });
-    marker.bindTooltip(jobs.length === 1 ? albamonMapTooltip(first) : mapClusterTooltip(jobs, "job"), richMapTooltipOptions());
+    marker.bindTooltip(jobs.length === 1 ? albamonMapTooltip(first, frontierIds) : mapClusterTooltip(jobs, "job"), richMapTooltipOptions());
     marker.on("click", () => jobs.length === 1
       ? selectJob(Number(first.recruit_no), elements.map)
-      : openPointChoices(jobs.map(albamonPointForJob), "albamon"));
+      : openPointChoices(jobs.map((job) => albamonPointForJob(job, state.payMetric)), "albamon"));
     marker.addTo(state.map);
     for (const job of jobs) state.markers.set(Number(job.recruit_no), marker);
   }
   fitAlbamonMap();
 }
 
-function hotelMarkerIcon(hotel, selected) {
-  const selectedClass = selected ? " map-marker--selected" : "";
-  const frontierClass = isHotelOnFrontier(hotel, state.hotelPayMode)
-    ? " map-marker--frontier"
-    : "";
+function hotelMarkerIcon(hotels, selected) {
+  const providers = mergedHotelProviderComparisons(hotels, state.hotelPayMode, state.payMetric);
+  const frontier = hotels.some((hotel) => isHotelOnFrontier(hotel, state.hotelPayMode, state.payMetric));
+  if (state.hotelGranularity === "provider") {
+    const size = providers.length > 1 || selected ? 46 : 30;
+    const radius = providers.length <= 1 ? 0 : providers.length === 2 ? 10 : 13;
+    const dots = providers.map((provider, index) => {
+      const angle = -Math.PI / 2 + (2 * Math.PI * index) / providers.length;
+      const x = Math.round(Math.cos(angle) * radius);
+      const y = Math.round(Math.sin(angle) * radius);
+      return `<span class="hotel-provider-cloud__dot" style="--provider-color:${provider.color};--provider-x:${x}px;--provider-y:${y}px"></span>`;
+    }).join("");
+    const classes = ["hotel-provider-cloud"];
+    if (frontier) classes.push("hotel-provider-cloud--frontier");
+    if (selected) classes.push("hotel-provider-cloud--selected");
+    const count = hotels.length > 1
+      ? `<span class="hotel-provider-cloud__count">${hotels.length}</span>`
+      : "";
+    return window.L.divIcon({
+      className: "",
+      html: `<div class="${classes.join(" ")}" style="--cloud-size:${size}px"><span class="hotel-provider-cloud__anchor"></span>${dots}${count}</div>`,
+      iconSize: [size, size],
+      iconAnchor: [size / 2, size / 2],
+    });
+  }
+  const size = selected || hotels.length > 1 ? 34 : 28;
+  const classes = ["hotel-source-marker"];
+  if (frontier) classes.push("hotel-source-marker--frontier");
+  if (selected) classes.push("hotel-source-marker--selected");
+  if (hotels.length > 1) classes.push("hotel-source-marker--cluster");
+  const center = hotels.length > 1 ? String(hotels.length) : "";
   return window.L.divIcon({
     className: "",
-    html: `<div class="map-marker${frontierClass}${selectedClass}"><span>${selected ? "●" : ""}</span></div>`,
-    iconSize: selected ? [30, 30] : [24, 24],
-    iconAnchor: selected ? [8, 27] : [6, 21],
+    html: `<div class="${classes.join(" ")}" style="--provider-ring:${providerConicGradient(providers)};--provider-best:${providers[0]?.color || "#73847d"}"><span class="hotel-source-marker__core">${center}</span></div>`,
+    iconSize: [size, size],
+    iconAnchor: [size / 2, size / 2],
   });
 }
 
@@ -2235,6 +2838,7 @@ function initializeHotelMap() {
     { icon: originIcon, zIndexOffset: 900 },
   ).addTo(state.hotelMap).bindTooltip(`Commute origin · ${origin.name}`, { direction: "top" });
   state.hotelMap.on("click", handleOriginMapClick);
+  state.hotelMap.on("zoomend moveend", scheduleHotelMapLabelRefresh);
   syncOriginCandidateMarkers();
   state.hotelMapResizeObserver = observeLeafletContainer(
     elements.hotelMap,
@@ -2243,11 +2847,109 @@ function initializeHotelMap() {
   );
 }
 
+function clearHotelMapLabels() {
+  if (state.hotelLabelFrame !== null) {
+    window.cancelAnimationFrame(state.hotelLabelFrame);
+    state.hotelLabelFrame = null;
+  }
+  for (const label of state.hotelMapLabels) label.remove();
+  state.hotelMapLabels = [];
+}
+
+function scheduleHotelMapLabelRefresh() {
+  if (!state.hotelMap || state.hotelVisualization !== "map") return;
+  if (state.hotelLabelFrame !== null) window.cancelAnimationFrame(state.hotelLabelFrame);
+  state.hotelLabelFrame = window.requestAnimationFrame(() => {
+    state.hotelLabelFrame = null;
+    renderHotelMapLabels();
+  });
+}
+
+function rectanglesOverlap(left, right, padding = 4) {
+  return !(
+    left.right + padding < right.left ||
+    right.right + padding < left.left ||
+    left.bottom + padding < right.top ||
+    right.bottom + padding < left.top
+  );
+}
+
+function renderHotelMapLabels() {
+  if (!state.hotelMap || state.hotelVisualization !== "map" || elements.hotelMap.hidden) return;
+  for (const label of state.hotelMapLabels) label.remove();
+  state.hotelMapLabels = [];
+
+  const zoom = state.hotelMap.getZoom();
+  const groups = new Map();
+  for (const hotel of visibleHotelMapHotels()) {
+    const key = `${Number(hotel.latitude).toFixed(5)},${Number(hotel.longitude).toFixed(5)}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(hotel);
+  }
+  let candidates = [...groups.values()].map((hotels) => {
+    const selected = hotels.some((hotel) => String(hotel.hotel_id) === state.selectedHotelId);
+    const frontier = hotels.some((hotel) => isHotelOnFrontier(hotel, state.hotelPayMode, state.payMetric));
+    const pay = Math.max(...hotels.map((hotel) => hotelComparablePay(hotel, state.hotelPayMode, state.payMetric) || 0));
+    return { hotels, selected, frontier, pay };
+  }).filter((candidate) => candidate.selected || candidate.frontier || zoom >= 14)
+    .sort((left, right) =>
+      Number(right.selected) - Number(left.selected) ||
+      Number(right.frontier) - Number(left.frontier) ||
+      right.pay - left.pay
+    );
+  if (zoom < 12) candidates = candidates.slice(0, 4);
+
+  const occupied = [];
+  const mapSize = state.hotelMap.getSize();
+  for (const candidate of candidates) {
+    const hotel = candidate.hotels[0];
+    const point = state.hotelMap.latLngToContainerPoint([
+      Number(hotel.latitude),
+      Number(hotel.longitude),
+    ]);
+    const employer = candidate.hotels.length > 1
+      ? `${candidate.hotels.length} hotels`
+      : cleanText(hotel.employer) || "Hotel";
+    const provider = hotelProviderComparisons(hotel, state.hotelPayMode, state.payMetric)[0];
+    const suffix = state.hotelGranularity === "provider" && provider ? ` · ${provider.label}` : "";
+    const text = `${truncateLabel(employer, 22)}${suffix}`;
+    const width = Math.min(210, 30 + text.length * 7);
+    const height = 25;
+    const placeLeft = point.x + 22 + width > mapSize.x - 8;
+    const rect = {
+      left: placeLeft ? point.x - 22 - width : point.x + 22,
+      right: placeLeft ? point.x - 22 : point.x + 22 + width,
+      top: point.y - height / 2,
+      bottom: point.y + height / 2,
+    };
+    if (!candidate.selected && occupied.some((current) => rectanglesOverlap(rect, current))) continue;
+    occupied.push(rect);
+    const content = createElement("span", "hotel-map-label-content");
+    if (provider) {
+      const swatch = createElement("i", "provider-swatch");
+      swatch.style.setProperty("--provider-color", provider.color);
+      content.append(swatch);
+    }
+    content.append(document.createTextNode(text));
+    const label = window.L.tooltip({
+      permanent: true,
+      direction: placeLeft ? "left" : "right",
+      offset: [placeLeft ? -18 : 18, 0],
+      className: `hotel-map-label${candidate.selected ? " hotel-map-label--selected" : ""}`,
+      opacity: 1,
+      interactive: false,
+    }).setLatLng([Number(hotel.latitude), Number(hotel.longitude)])
+      .setContent(content)
+      .addTo(state.hotelMap);
+    state.hotelMapLabels.push(label);
+  }
+}
+
 function fitHotelMap() {
   if (!state.hotelMap || !state.hotelPayload || elements.hotelMap.hidden) return;
   const { origin } = state.hotelPayload;
   const bounds = [[origin.latitude, origin.longitude]];
-  for (const hotel of state.filteredHotels.filter(hasPlausibleMapLocation)) {
+  for (const hotel of visibleHotelMapHotels()) {
     bounds.push([Number(hotel.latitude), Number(hotel.longitude)]);
   }
   if (bounds.length > 1) state.hotelMap.fitBounds(bounds, { padding: [28, 28], maxZoom: 13 });
@@ -2258,10 +2960,14 @@ function renderHotelMapMarkers() {
   if (state.hotelVisualization !== "map") return;
   initializeHotelMap();
   if (!state.hotelMap) return;
+  clearHotelMapLabels();
   for (const marker of new Set(state.hotelMarkers.values())) marker.remove();
   state.hotelMarkers.clear();
   const groups = new Map();
-  for (const hotel of state.filteredHotels.filter(hasPlausibleMapLocation)) {
+  const allProviderPoints = state.hotelGranularity === "provider"
+    ? hotelProviderParetoPoints(state.filteredHotels, state.hotelPayMode, state.payMetric)
+    : [];
+  for (const hotel of visibleHotelMapHotels()) {
     const key = `${Number(hotel.latitude).toFixed(5)},${Number(hotel.longitude).toFixed(5)}`;
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push(hotel);
@@ -2269,21 +2975,30 @@ function renderHotelMapMarkers() {
   for (const hotels of groups.values()) {
     const first = hotels[0];
     const selected = hotels.some((hotel) => String(hotel.hotel_id) === state.selectedHotelId);
+    const hotelIds = new Set(hotels.map((hotel) => String(hotel.hotel_id)));
+    const providerPoints = allProviderPoints.filter((point) =>
+      hotelIds.has(String(point.hotel.hotel_id))
+    );
     const marker = window.L.marker([Number(first.latitude), Number(first.longitude)], {
-      icon: hotels.length === 1
-        ? hotelMarkerIcon(first, selected)
-        : clusteredMarkerIcon(hotels.length, selected, hotels.some((hotel) => isHotelOnFrontier(hotel, state.hotelPayMode))),
+      icon: hotelMarkerIcon(hotels, selected),
       zIndexOffset: selected ? 1000 : 0,
-      title: hotels.length === 1 ? first.employer : `${hotels.length} hotels at this worksite`,
+      title: hotels.length === 1
+        ? `${first.employer} — ${hotelProviderComparisons(first, state.hotelPayMode, state.payMetric).map((provider) => provider.label).join(", ")}`
+        : `${hotels.length} hotels at this worksite`,
     });
     marker.bindTooltip(hotels.length === 1 ? hotelMapTooltip(first) : mapClusterTooltip(hotels, "hotel"), richMapTooltipOptions());
-    marker.on("click", () => hotels.length === 1
-      ? selectHotel(String(first.hotel_id), elements.hotelMap)
-      : openPointChoices(hotels.map((hotel) => hotelPointForHotel(hotel, state.hotelPayMode)), "hotel"));
+    marker.on("click", () => {
+      const choices = state.hotelGranularity === "provider"
+        ? providerPoints
+        : hotels.map((hotel) => hotelPointForHotel(hotel, state.hotelPayMode, state.payMetric));
+      if (choices.length === 1) selectHotel(String(choices[0].hotel.hotel_id), elements.hotelMap);
+      else openPointChoices(choices, "hotel");
+    });
     marker.addTo(state.hotelMap);
     for (const hotel of hotels) state.hotelMarkers.set(String(hotel.hotel_id), marker);
   }
   fitHotelMap();
+  scheduleHotelMapLabelRefresh();
 }
 
 async function requestHotelMapLoad() {
@@ -2355,10 +3070,10 @@ function actionLink(text, href, primary = false) {
 }
 
 function renderHotelDrawer(hotel) {
-  const frontier = isHotelOnFrontier(hotel, state.hotelPayMode);
+  const frontier = isHotelOnFrontier(hotel, state.hotelPayMode, state.payMetric);
   elements.drawerKicker.textContent = `${frontier ? "Pareto frontier" : "Hotel option"} · Rank #${hotel.rank || "—"}`;
   elements.drawerTitle.textContent = hotel.employer || "Unknown hotel";
-  elements.drawerCompany.textContent = `${hotel.station || hotel.area || "Location unavailable"} · ${hotel.transit_minutes ?? "?"} min from ${state.hotelPayload.origin.name}`;
+  elements.drawerCompany.textContent = `${hotelLocationLabel(hotel)} · ${hotel.transit_minutes ?? "?"} min from ${state.hotelPayload.origin.name}`;
   elements.drawerBody.replaceChildren();
 
   const visibleOptions = hotel.filtered_job_options || hotel.job_options || [];
@@ -2396,8 +3111,13 @@ function renderHotelDrawer(hotel) {
     fact("Verified commute", `${hotel.transit_minutes ?? "?"} min`),
     fact("Available dates", `${hotel.date_count || 0}`),
     fact("Exact shifts", `${hotel.shift_count || 0}`),
-    fact("Best shift earnings", decision.estimatedEarnings ? formatWon(decision.estimatedEarnings) : "Unavailable"),
-    fact("Commute-adjusted rate", decision.adjustedHourly ? `${formatWon(decision.adjustedHourly)}/hr` : "Unavailable"),
+    fact(
+      "Best shift total",
+      hotel.actual_shift_total_max
+        ? `${formatWon(hotel.actual_shift_total_max)}${hotel.shift_total_includes_scheduled_estimates ? " · scheduled gross estimate" : ""}`
+        : "Unavailable",
+    ),
+    fact("Door-to-door rate", decision.adjustedHourly ? `${formatWon(decision.adjustedHourly)}/hr` : "Unavailable"),
   );
   overview.append(grid);
   elements.drawerBody.append(overview);
@@ -2406,14 +3126,17 @@ function renderHotelDrawer(hotel) {
   shifts.append(detailList(
     visibleOptions.map((option) => {
       const weekly = option.weekly_allowance_hourly_won
-        ? ` · 주휴* ${formatWon(option.weekly_allowance_hourly_won)}`
+        ? ` · 주휴* ${formatComparablePay(option.weekly_allowance_hourly_won, "hourly")}`
         : "";
       const providers = (option.best_agencies || []).join(" · ") || "provider check";
-      const decisionText = option.estimated_shift_earnings_won
-        ? ` · ${formatWon(option.estimated_shift_earnings_won)} shift · ${formatWon(option.commute_adjusted_hourly_won)}/hr incl. round-trip commute`
+      const fixedShiftText = option.estimated_shift_earnings_won
+        ? ` · ${formatWon(option.estimated_shift_earnings_won)} fixed shift`
+        : "";
+      const doorToDoorText = option.commute_adjusted_hourly_won
+        ? ` · ${formatWon(option.commute_adjusted_hourly_won)}/hr door-to-door`
         : "";
       const warnings = [option.late_return_risk ? "late-return check" : "", ...(option.pay_warnings || [])].filter(Boolean);
-      return `${option.work_date || (option.dates || []).join(", ")} · ${option.shift} · actual ${formatWon(option.actual_hourly_won ?? option.actual_hourly_max)}${weekly}${decisionText} · ${providers}${warnings.length ? ` · Check: ${warnings.join("; ")}` : ""}`;
+      return `${option.work_date || (option.dates || []).join(", ")} · ${option.shift} · actual ${formatComparablePay(option.actual_hourly_won ?? option.actual_hourly_max, "hourly")}${weekly}${fixedShiftText}${doorToDoorText} · ${providers}${warnings.length ? ` · Check: ${warnings.join("; ")}` : ""}`;
     }),
     "No exact shift options were preserved.",
   ));
@@ -2424,12 +3147,18 @@ function renderHotelDrawer(hotel) {
   for (const provider of visibleProviders) {
     const item = createElement("div", "fact provider-comparison-card");
     appendText(item, "span", "", provider.label || provider.agency || "Provider");
-    appendText(item, "strong", "", `Actual ${formatWon(provider.actual_hourly_max)}`);
+    appendText(item, "strong", "", `Actual ${formatComparablePay(provider.actual_hourly_max, "hourly")}`);
     appendText(
       item,
       "small",
       "cell-secondary",
-      `주휴* ${formatWon(provider.weekly_allowance_hourly_max)} · ${provider.offer_count || 0} offers`,
+      `주휴* ${formatComparablePay(provider.weekly_allowance_hourly_max, "hourly")} · ${provider.offer_count || 0} offers`,
+    );
+    appendText(
+      item,
+      "small",
+      "cell-secondary",
+      `Best shift ${formatWon(provider.actual_shift_total_max)}`,
     );
     if (provider.representative_url) {
       item.append(actionLink("View best listing", provider.representative_url));
@@ -2454,7 +3183,7 @@ function renderHotelDrawer(hotel) {
   const metadata = createElement("div", "detail-meta");
   metadata.append(
     createElement("span", "", `Hotel ID ${hotel.hotel_id}`),
-    createElement("span", "", `Pay view: ${state.hotelPayMode === "actual" ? "actual/base" : "conditional 주휴 with fallback"}`),
+    createElement("span", "", `Pay view: ${state.hotelPayMode === "actual" ? "actual/base" : "conditional 주휴 with fallback"} · ${payMetricLabel()}`),
   );
   elements.drawerBody.append(metadata);
 }
@@ -2570,7 +3299,24 @@ function renderDrawer(job) {
   const overview = detailSection("Decision snapshot");
   const grid = createElement("div", "detail-grid");
   grid.append(
-    fact("Comparable pay", `₩${formatNumber(job.comparable_hourly_pay)}/hr`),
+    fact(
+      "Work-hour equivalent",
+      hasNumericValue(job.work_hourly_pay) ? `₩${formatNumber(job.work_hourly_pay)}/hr` : "Unverified",
+    ),
+    fact(
+      "Door-to-door rate",
+      hasNumericValue(job.door_to_door_hourly_pay) ? `₩${formatNumber(job.door_to_door_hourly_pay)}/hr` : "Unavailable",
+    ),
+    fact(
+      "Total shift pay",
+      hasNumericValue(job.estimated_shift_earnings_won) ? formatWon(job.estimated_shift_earnings_won) : "Unavailable",
+    ),
+    fact(
+      "Total time commitment",
+      hasNumericValue(job.total_time_commitment_minutes)
+        ? `${formatNumber(job.total_time_commitment_minutes)} min including round-trip commute`
+        : "Unavailable",
+    ),
     fact("Headline pay", `${job.salary_type || ""} ${job.salary || "Not stated"}`.trim()),
     fact(
       (job.eligibility_lanes || []).includes("remote_short_term")
@@ -2869,6 +3615,28 @@ function setMobileView(view) {
   }
 }
 
+function syncHotelMobileView() {
+  const showVisual = state.hotelMobileView === "visual";
+  elements.hotelFrontierLayout.classList.toggle("show-hotel-visual", showVisual);
+  elements.hotelListTab.classList.toggle("is-active", !showVisual);
+  elements.hotelVisualTab.classList.toggle("is-active", showVisual);
+  elements.hotelListTab.setAttribute("aria-selected", String(!showVisual));
+  elements.hotelVisualTab.setAttribute("aria-selected", String(showVisual));
+}
+
+function setHotelMobileView(view) {
+  state.hotelMobileView = view === "visual" ? "visual" : "list";
+  syncHotelMobileView();
+  if (state.hotelMobileView !== "visual") return;
+  if (state.hotelVisualization === "map") {
+    requestHotelMapLoad().then(() => {
+      if (state.hotelMap) window.setTimeout(() => state.hotelMap.invalidateSize(), 20);
+    });
+  } else if (state.hotelPayload) {
+    syncHotelVisualization();
+  }
+}
+
 function setDefaultFilterControls() {
   elements.search.value = "";
   elements.status.value = "apply";
@@ -3007,6 +3775,7 @@ async function startOriginPinMode() {
   elements.originPinButton.textContent = "Click the map…";
   elements.originHelp.textContent = "Click the exact starting point on the map. The typed address will be used as its label.";
   if (state.activeDesk === "hotels") {
+    setHotelMobileView("visual");
     setHotelVisualization("map");
     await requestHotelMapLoad();
   } else {
@@ -3157,8 +3926,20 @@ elements.albamonDeskTab.addEventListener("click", () => setDesk("albamon"));
 elements.hotelsDeskTab.addEventListener("click", () => setDesk("hotels"));
 elements.albamonMapVisual.addEventListener("click", () => setAlbamonVisualization("map"));
 elements.albamonParetoVisual.addEventListener("click", () => setAlbamonVisualization("pareto"));
+elements.albamonPayHourly.addEventListener("click", () => setPayMetric("hourly"));
+elements.albamonPayTotal.addEventListener("click", () => setPayMetric("shift_total"));
+elements.hotelPayHourly.addEventListener("click", () => setPayMetric("hourly"));
+elements.hotelPayTotal.addEventListener("click", () => setPayMetric("shift_total"));
+elements.albamonMarkerActionable.addEventListener("click", () => setAlbamonMarkerVisibility("actionable", !state.albamonMarkerVisibility.actionable));
+elements.albamonMarkerOther.addEventListener("click", () => setAlbamonMarkerVisibility("other", !state.albamonMarkerVisibility.other));
 elements.hotelMapVisual.addEventListener("click", () => setHotelVisualization("map"));
 elements.hotelParetoVisual.addEventListener("click", () => setHotelVisualization("pareto"));
+elements.hotelListTab.addEventListener("click", () => setHotelMobileView("list"));
+elements.hotelVisualTab.addEventListener("click", () => setHotelMobileView("visual"));
+elements.hotelGranularityHotel.addEventListener("click", () => setHotelGranularity("hotel"));
+elements.hotelGranularityProvider.addEventListener("click", () => setHotelGranularity("provider"));
+elements.hotelGroupOverlaps.addEventListener("click", () => setGroupOverlaps(!state.groupOverlaps));
+elements.albamonGroupOverlaps.addEventListener("click", () => setGroupOverlaps(!state.groupOverlaps));
 elements.albamonParetoChart.addEventListener("pointerover", (event) => {
   const point = paretoPointElement(event.target);
   if (!point || point.contains(event.relatedTarget)) return;
@@ -3196,7 +3977,7 @@ elements.hotelChart.addEventListener("pointerover", (event) => {
 });
 elements.hotelChart.addEventListener("pointermove", (event) => {
   const point = hotelPointElement(event.target);
-  if (!point || elements.hotelParetoTooltip.dataset.hotelId !== point.dataset.hotelPointId) return;
+  if (!point || elements.hotelParetoTooltip.dataset.pointId !== point.dataset.hotelPointId) return;
   positionHotelParetoTooltip(point, event);
 });
 elements.hotelChart.addEventListener("pointerout", (event) => {
@@ -3287,9 +4068,9 @@ elements.hotelSearchFilter.addEventListener("input", () => {
   }, 100);
 });
 elements.hotelClearFilters.addEventListener("click", () => {
-  setHotelFilterControls({ minimumPay: "12000" });
+  setHotelFilterControls({ minimumPay: configuredHotelMinimumPay() });
   state.hotelPayMode = "actual";
-  elements.hotelSavedSearch.value = "";
+  renderSavedHotelSearches();
   removeStoredValue(HOTEL_FILTER_STORAGE_KEY);
   persistHotelFilters();
   if (state.hotelPayload) renderHotelView();
@@ -3356,6 +4137,9 @@ document.addEventListener("keydown", (event) => {
 });
 
 restoreHotelSearchPreferences();
+restoreVisualizationPreferences();
 restoreHotelFilters();
+syncPayMetricControls();
+syncAlbamonMarkerToggles();
 renderSavedHotelSearches();
 loadData();

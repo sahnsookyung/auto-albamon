@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from typing import Any, Iterable
 
 from .config import SOURCE_LABELS
+from .pareto import comparable_pay, pareto_hotel_ids
 
 
 DISCORD_MESSAGE_LIMIT = 2_000
@@ -235,16 +236,46 @@ def _job_options(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         actual = row.get("best_actual_hourly_won")
         weekly = row.get("best_weekly_allowance_hourly_won")
         commute = row.get("transit_minutes")
+        offers = [
+            offer for offer in row.get("offers") or [] if isinstance(offer, dict)
+        ]
+        highest_paying = set(row.get("highest_paying_agencies") or [])
+        best_offers = [
+            offer
+            for offer in offers
+            if offer.get("agency") in highest_paying
+            and (offer.get("pay") or {}).get("actual_hourly_won") == actual
+        ]
+        # A fixed daily amount is the only tied offer that can support an honest
+        # door-to-door rate without guessing how much of an hourly shift is paid.
+        best_offer = next(
+            (
+                offer
+                for offer in best_offers
+                if (offer.get("pay") or {}).get("pay_frequency") == "daily"
+                and isinstance(
+                    (offer.get("pay") or {}).get("advertised_shift_won"), int
+                )
+            ),
+            best_offers[0] if best_offers else None,
+        )
+        best_pay = (
+            best_offer.get("pay")
+            if isinstance(best_offer, dict) and isinstance(best_offer.get("pay"), dict)
+            else {}
+        )
+        fixed_shift_pay = (
+            best_pay.get("advertised_shift_won")
+            if best_pay.get("pay_frequency") == "daily"
+            and isinstance(best_pay.get("advertised_shift_won"), int)
+            else None
+        )
         total_minutes = (
             duration_minutes + (2 * int(commute))
             if duration_minutes is not None and isinstance(commute, int)
             else None
         )
-        estimated_earnings = (
-            round(int(actual) * duration_minutes / 60)
-            if isinstance(actual, int) and duration_minutes is not None
-            else None
-        )
+        estimated_earnings = fixed_shift_pay
         commute_adjusted = (
             round(estimated_earnings * 60 / total_minutes)
             if isinstance(estimated_earnings, int)
@@ -252,9 +283,6 @@ def _job_options(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             and total_minutes > 0
             else None
         )
-        offers = [
-            offer for offer in row.get("offers") or [] if isinstance(offer, dict)
-        ]
         warnings = sorted(
             {
                 str(warning)
@@ -273,6 +301,9 @@ def _job_options(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     "weekly_allowance_hourly_won": pay.get(
                         "weekly_allowance_hourly_won"
                     ),
+                    "pay_frequency": pay.get("pay_frequency"),
+                    "advertised_shift_won": pay.get("advertised_shift_won"),
+                    "actual_basis": pay.get("actual_basis"),
                     "source_url": str(offer.get("source_url") or ""),
                 }
             )
@@ -288,13 +319,27 @@ def _job_options(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "best_agencies": list(row.get("highest_paying_agencies") or []),
                 "agencies": list(row.get("agencies") or []),
                 "provider_offers": provider_offers,
+                "offer_count": len(offers),
+                "cross_agency_duplicate": bool(
+                    row.get("cross_agency_duplicate")
+                ),
                 "duration_minutes": duration_minutes,
                 "estimated_shift_earnings_won": estimated_earnings,
+                "estimated_shift_earnings_basis": (
+                    "advertised fixed shift pay"
+                    if isinstance(estimated_earnings, int)
+                    else "unavailable; hourly listing does not state paid break duration"
+                ),
                 "round_trip_commute_minutes": (
                     2 * int(commute) if isinstance(commute, int) else None
                 ),
                 "total_time_commitment_minutes": total_minutes,
                 "commute_adjusted_hourly_won": commute_adjusted,
+                "commute_adjusted_basis": (
+                    "fixed shift pay divided by scheduled span plus round-trip commute"
+                    if isinstance(commute_adjusted, int)
+                    else "unavailable without reliable fixed shift earnings and commute"
+                ),
                 "daytime": _is_daytime_shift(shift),
                 "late_return_risk": _late_return_risk(shift),
                 "pay_confidence": "high" if not warnings else "review",
@@ -494,6 +539,96 @@ def _overview_row(hotel: dict[str, Any]) -> str:
     )
 
 
+def _pareto_row(
+    hotel: dict[str, Any],
+    *,
+    actual_ids: set[str],
+    weekly_ids: set[str],
+) -> str:
+    hotel_id = str(hotel.get("hotel_id") or "")
+    modes = []
+    if hotel_id in actual_ids:
+        modes.append("실제")
+    if hotel_id in weekly_ids:
+        modes.append("주휴*")
+    commute = (
+        f"{hotel['transit_minutes']}분"
+        if isinstance(hotel.get("transit_minutes"), int)
+        else "통근 미검증"
+    )
+    providers = "/".join(
+        SOURCE_SHORT_LABELS.get(value, value)
+        for value in hotel.get("best_agencies") or []
+    ) or "업체 확인"
+    return (
+        f"• **{_safe_text(hotel.get('employer'), limit=54)}** · "
+        f"실제 {_won(comparable_pay(hotel, 'actual'))} · "
+        f"주휴* {_won(hotel.get('weekly_allowance_hourly_max'))} · "
+        f"{commute} · {providers} · {','.join(modes)} frontier"
+    )
+
+
+def _pareto_context(hotels: list[dict[str, Any]], *, limit: int = 6) -> str:
+    actual_ids = pareto_hotel_ids(hotels, mode="actual")
+    weekly_ids = pareto_hotel_ids(hotels, mode="weekly_allowance")
+    union = [
+        hotel
+        for hotel in hotels
+        if str(hotel.get("hotel_id") or "") in actual_ids | weekly_ids
+    ]
+    union.sort(
+        key=lambda hotel: (
+            str(hotel.get("hotel_id") or "") not in actual_ids,
+            -int(comparable_pay(hotel, "actual") or 0),
+            int(hotel.get("transit_minutes") or 10_000),
+        )
+    )
+    lines = [
+        f"실제시급 frontier {len(actual_ids)}곳 · 주휴 고려 frontier {len(weekly_ids)}곳"
+    ]
+    lines.extend(
+        _pareto_row(hotel, actual_ids=actual_ids, weekly_ids=weekly_ids)
+        for hotel in union[:limit]
+    )
+    if len(union) > limit:
+        lines.append(f"• 그 외 {len(union) - limit}곳은 대시보드에서 비교")
+    return "\n".join(lines)
+
+
+def _pareto_pages(hotels: list[dict[str, Any]]) -> list[DigestPage]:
+    actual_ids = pareto_hotel_ids(hotels, mode="actual")
+    weekly_ids = pareto_hotel_ids(hotels, mode="weekly_allowance")
+    frontier = [
+        hotel
+        for hotel in hotels
+        if str(hotel.get("hotel_id") or "") in actual_ids | weekly_ids
+    ]
+    frontier.sort(
+        key=lambda hotel: (
+            str(hotel.get("hotel_id") or "") not in actual_ids,
+            -int(comparable_pay(hotel, "actual") or 0),
+            int(hotel.get("transit_minutes") or 10_000),
+        )
+    )
+    return _paginate_blocks(
+        title="🏆 **호텔 Pareto 추천**",
+        intro=(
+            f"실제시급 기준 {len(actual_ids)}곳 · 주휴 고려 기준 {len(weekly_ids)}곳\n"
+            "같은 행의 실제/주휴* 시급과 왕복 전 편도 통근을 함께 비교합니다."
+        ),
+        blocks=[
+            (
+                str(hotel["hotel_id"]),
+                _pareto_row(
+                    hotel, actual_ids=actual_ids, weekly_ids=weekly_ids
+                ),
+            )
+            for hotel in frontier
+        ],
+        separator="\n",
+    )
+
+
 def _hotel_block(hotel: dict[str, Any], *, change_kind: str | None = None) -> str:
     change = "🆕 " if change_kind == "new" else "🔄 " if change_kind else ""
     actual_range = _won(hotel.get("actual_hourly_max"))
@@ -651,6 +786,7 @@ def _overview_pages(
 def format_complete_digest(
     report: dict[str, Any], hotels: list[dict[str, Any]]
 ) -> list[DigestPage]:
+    frontier = _pareto_pages(hotels)
     overview = _overview_pages(hotels, report)
     details = _paginate_blocks(
         title="🏨 **호텔별 날짜·시간·업체 상세**",
@@ -663,15 +799,21 @@ def format_complete_digest(
             (str(hotel["hotel_id"]), _hotel_block(hotel)) for hotel in hotels
         ],
     )
-    return [*overview, *details]
+    return [*frontier, *overview, *details]
 
 
 def format_update_digest(
-    changed_hotels: list[tuple[str, dict[str, Any]]]
+    changed_hotels: list[tuple[str, dict[str, Any]]],
+    all_hotels: list[dict[str, Any]] | None = None,
 ) -> list[DigestPage]:
     return _paginate_blocks(
-        title="🏨 **호텔 단기알바 변경사항**",
-        intro="같은 호텔의 날짜·시간·업체를 다시 묶은 최신 전체 상태입니다.",
+        title="🏆 **현재 호텔 Pareto 추천 + 새 변경사항**",
+        intro=(
+            f"{_pareto_context(all_hotels or [hotel for _, hotel in changed_hotels])}\n"
+            f"\n🆕 새 호텔 {sum(kind == 'new' for kind, _ in changed_hotels)}곳 · "
+            f"변경 {sum(kind == 'changed' for kind, _ in changed_hotels)}곳\n"
+            "새 결과는 호텔별 날짜·시간·업체를 합친 최신 상태입니다."
+        ),
         blocks=[
             (
                 str(hotel["hotel_id"]),

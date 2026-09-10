@@ -28,6 +28,7 @@
     </header>
 
     <main>
+      <section class="context-bar" aria-label="Job source and commute origin">
       <nav class="desk-tabs" role="tablist" aria-label="Job source">
         <button class="desk-tab is-active" id="albamon-desk-tab" type="button" role="tab" aria-selected="true" aria-controls="albamon-view">
           <span>Albamon</span>
@@ -49,14 +50,19 @@
           </div>
         </div>
         <div class="origin-actions">
-          <a class="secondary-button" id="origin-kakao-link" target="_blank" rel="noopener noreferrer">Kakao Map</a>
-          <a class="secondary-button" id="origin-naver-link" target="_blank" rel="noopener noreferrer">Naver Map</a>
+          <details class="origin-map-menu">
+            <summary class="secondary-button">Open map</summary>
+            <div class="origin-map-menu-links">
+              <a id="origin-kakao-link" target="_blank" rel="noopener noreferrer">Kakao Map</a>
+              <a id="origin-naver-link" target="_blank" rel="noopener noreferrer">Naver Map</a>
+            </div>
+          </details>
           <button class="primary-button" id="origin-edit-button" type="button">Change origin</button>
         </div>
         <form class="origin-editor" id="origin-editor" hidden>
           <label class="field origin-address-field">
             <span>Search a Korean address</span>
-            <input id="origin-address-input" type="search" maxlength="240" autocomplete="street-address" placeholder="e.g. 서울특별시 송파구 올림픽로 140">
+            <input id="origin-address-input" type="search" maxlength="240" autocomplete="street-address" placeholder="e.g. 서울특별시 중구 세종대로 110">
           </label>
           <button class="secondary-button" id="origin-search-button" type="submit">Find address</button>
           <button class="secondary-button" id="origin-pin-button" type="button" aria-pressed="false">Drop pin on map</button>
@@ -70,68 +76,53 @@
           <p class="origin-help" id="origin-help">Address search uses the existing Kakao free-tier budget. Pin drop itself makes no API call.</p>
         </form>
       </section>
+      </section>
 
       <section id="albamon-view" role="tabpanel" aria-labelledby="albamon-desk-tab">
       <section class="summary-strip" aria-label="Pipeline summary">
-        <button class="summary-card" id="summary-new-card" type="button" aria-pressed="false">
+        <button class="summary-card" id="summary-new-card" type="button" aria-pressed="false" aria-describedby="summary-new-help" data-help="Actionable jobs first recorded in the rolling 24-hour window. New is a recency label, not a decision state. Click to show this queue.">
           <span class="summary-icon" aria-hidden="true">N</span>
           <div>
             <strong id="summary-new">—</strong>
             <span>New in 24h</span>
-            <small>Actionable jobs first seen during the last 24 hours</small>
+            <small class="sr-only" id="summary-new-help">Actionable jobs first seen during the last 24 hours</small>
           </div>
         </button>
-        <button class="summary-card" id="summary-actionable-card" type="button" aria-pressed="false">
+        <button class="summary-card" id="summary-actionable-card" type="button" aria-pressed="false" aria-describedby="summary-actionable-detail" data-help="Jobs that passed the automatic date, schedule, pay, commute, worksite, and exclusion rules. Some can still require a posting-condition check. Click to show them.">
           <span class="summary-icon" aria-hidden="true">A</span>
           <div>
             <strong id="summary-actionable">—</strong>
             <span>Actionable matches</span>
-            <small id="summary-actionable-detail">Passed automatic eligibility filters</small>
+            <small class="sr-only" id="summary-actionable-detail">Passed automatic eligibility filters</small>
           </div>
         </button>
-        <button class="summary-card" id="summary-attention-card" type="button" aria-pressed="false">
+        <button class="summary-card" id="summary-attention-card" type="button" aria-pressed="false" aria-describedby="summary-attention-detail" data-help="Jobs needing a posting-condition check or a decision you deferred. Open a job and mark its stated check complete to resolve the current evidence version. Changed evidence reopens it; the Status filter separates both queues.">
           <span class="summary-icon" aria-hidden="true">!</span>
           <div>
             <strong id="summary-attention">—</strong>
             <span>Manual review queue</span>
-            <small id="summary-attention-detail">Posting-condition checks or deferred decisions</small>
+            <small class="sr-only" id="summary-attention-detail">Posting-condition checks or deferred decisions</small>
           </div>
         </button>
-        <p class="pipeline-note" id="pipeline-note"></p>
+        <details class="pipeline-disclosure">
+          <summary>Run details</summary>
+          <p class="pipeline-note" id="pipeline-note"></p>
+        </details>
       </section>
 
-      <section class="queue-guide" aria-labelledby="queue-guide-heading">
-        <div class="queue-guide-heading">
-          <div>
-            <p class="eyebrow">DECISION QUEUES</p>
-            <h2 id="queue-guide-heading">What each counter means</h2>
-          </div>
-          <span>Click a counter or a button below to show that exact queue.</span>
+      <section class="workspace" aria-label="Job results and map">
+        <div class="view-tabs" role="tablist" aria-label="Result view">
+          <button class="view-tab is-active" id="table-tab" type="button" role="tab" aria-selected="true" aria-controls="results-panel">List</button>
+          <button class="view-tab" id="map-tab" type="button" role="tab" aria-selected="false" aria-controls="map-panel">Visual</button>
         </div>
-        <div class="queue-guide-grid">
-          <article>
-            <strong>New in 24h</strong>
-            <p>A subset of actionable jobs first recorded by JobScout during the rolling 24-hour window. The “New” badge expires automatically; it is not a decision state.</p>
-            <button class="text-button queue-filter-button" type="button" data-queue-filter="new">Show new jobs</button>
-          </article>
-          <article>
-            <strong>Actionable matches</strong>
-            <p>Jobs that passed the automated date, schedule, pay, commute, worksite, and exclusion rules. Some can still require a manual posting-condition check.</p>
-            <button class="text-button queue-filter-button" type="button" data-queue-filter="actionable">Show actionable jobs</button>
-          </article>
-          <article>
-            <strong>Manual review queue</strong>
-            <p>Either a posting condition JobScout cannot confirm—such as eligibility, exact worksite, or a certificate—or a job you deliberately deferred with “Maybe later.”</p>
-            <div class="queue-guide-actions">
-              <button class="text-button queue-filter-button" type="button" data-queue-filter="requirements">Posting-condition checks</button>
-              <button class="text-button queue-filter-button" type="button" data-queue-filter="deferred">Deferred decisions</button>
-            </div>
-          </article>
-        </div>
-        <p class="queue-resolution-note"><strong>Resolving a review:</strong> open the job and complete the stated check. Marking it complete removes that exact evidence version from this queue; changed evidence reopens it. A deferred job leaves the queue when you restore it to actionable or skip it. Albamon application history removes applied jobs automatically.</p>
-      </section>
 
-      <section class="filter-panel" aria-labelledby="filter-heading">
+        <section class="results-panel" id="results-panel" aria-labelledby="results-heading">
+        <details class="filter-disclosure">
+          <summary>
+            <span><strong>Filters</strong><small id="albamon-filter-summary">Default policy view</small></span>
+            <span class="filter-summary-hint">Open controls</span>
+          </summary>
+      <div class="filter-panel" aria-labelledby="filter-heading">
         <div class="filter-heading-row">
           <div>
             <p class="eyebrow">SHORTLIST CONTROLS</p>
@@ -139,7 +130,7 @@
           </div>
           <button class="text-button" id="clear-filters" type="button">Reset filters</button>
         </div>
-        <div class="filters">
+        <div class="filters filters--primary">
           <label class="field field--search">
             <span>Search</span>
             <span class="input-shell">
@@ -159,16 +150,6 @@
               <option value="do_not_apply">Skipped</option>
               <option value="excluded_by_distance">Distance excluded</option>
               <option value="applied">Already applied</option>
-            </select>
-          </label>
-          <label class="field">
-            <span>Schedule match</span>
-            <select id="schedule-filter">
-              <option value="all">All schedules</option>
-              <option value="remote">Remote · flexible/weekend</option>
-              <option value="late_night">Station corridor · 19–02</option>
-              <option value="exact">Exact Sat or Sun</option>
-              <option value="negotiable">Negotiable weekend</option>
             </select>
           </label>
           <label class="field">
@@ -198,55 +179,53 @@
               <option value="20000">₩20,000+</option>
             </select>
           </label>
-          <label class="field field--district">
-            <span>District</span>
-            <select id="district-filter">
-              <option value="all">All districts</option>
-            </select>
-          </label>
-          <label class="field field--zone">
-            <span>Priority zone</span>
-            <select id="zone-filter">
-              <option value="all">All zones</option>
-              <option value="remote">Remote · 재택</option>
-              <option value="core">Core · 강남/송파</option>
-              <option value="seocho_corridor">서초 · 방배/내방/반포/교대</option>
-              <option value="east_near_core">East · 강동/성동/광진</option>
-              <option value="premium_stretch">Premium · 용산/영등포</option>
-              <option value="outer_seoul">Outer Seoul</option>
-            </select>
-          </label>
         </div>
-        <div class="filter-footer">
-          <div class="filter-toggles" aria-label="Quick constraints">
-            <label class="checkbox-field">
-              <input id="new-filter" type="checkbox">
-              <span>New in the last 24h</span>
-            </label>
-            <label class="checkbox-field">
-              <input id="closing-filter" type="checkbox">
-              <span>Closing within 72h</span>
-            </label>
-            <label class="checkbox-field">
-              <input id="requirements-filter" type="checkbox">
-              <span>No hard requirements</span>
-            </label>
-            <label class="checkbox-field">
-              <input id="easy-apply-filter" type="checkbox">
-              <span>Easy online apply</span>
-            </label>
+        <details class="advanced-filter-disclosure">
+          <summary><strong>More filters</strong><small>Schedule, area, priority, and quick constraints</small></summary>
+          <div class="advanced-filter-body">
+            <div class="filters filters--advanced">
+              <label class="field">
+                <span>Schedule match</span>
+                <select id="schedule-filter">
+                  <option value="all">All schedules</option>
+                  <option value="remote">Remote · flexible/weekend</option>
+                  <option value="late_night">Station corridor · 19–02</option>
+                  <option value="exact">Exact Sat or Sun</option>
+                  <option value="negotiable">Negotiable weekend</option>
+                </select>
+              </label>
+              <label class="field field--district">
+                <span>District</span>
+                <select id="district-filter">
+                  <option value="all">All districts</option>
+                </select>
+              </label>
+              <label class="field field--zone">
+                <span>Priority zone</span>
+                <select id="zone-filter">
+                  <option value="all">All zones</option>
+                  <option value="remote">Remote · 재택</option>
+                  <option value="core">Core · 강남/송파</option>
+                  <option value="seocho_corridor">서초 · 방배/내방/반포/교대</option>
+                  <option value="east_near_core">East · 강동/성동/광진</option>
+                  <option value="premium_stretch">Premium · 용산/영등포</option>
+                  <option value="outer_seoul">Outer Seoul</option>
+                </select>
+              </label>
+            </div>
+            <div class="filter-toggles" aria-label="Quick constraints">
+              <label class="checkbox-field"><input id="new-filter" type="checkbox"><span>New in the last 24h</span></label>
+              <label class="checkbox-field"><input id="closing-filter" type="checkbox"><span>Closing within 72h</span></label>
+              <label class="checkbox-field"><input id="requirements-filter" type="checkbox"><span>No hard requirements</span></label>
+              <label class="checkbox-field"><input id="easy-apply-filter" type="checkbox"><span>Easy online apply</span></label>
+            </div>
           </div>
+        </details>
+        <div class="filter-footer">
           <p class="filter-feedback" id="filter-feedback" aria-live="polite">Loading report jobs…</p>
         </div>
-      </section>
-
-      <section class="workspace" aria-label="Job results and map">
-        <div class="view-tabs" role="tablist" aria-label="Result view">
-          <button class="view-tab is-active" id="table-tab" type="button" role="tab" aria-selected="true" aria-controls="results-panel">List</button>
-          <button class="view-tab" id="map-tab" type="button" role="tab" aria-selected="false" aria-controls="map-panel">Visual</button>
-        </div>
-
-        <section class="results-panel" id="results-panel" aria-labelledby="results-heading">
+      </div>
+      </details>
           <div class="panel-heading">
             <div>
               <p class="eyebrow" id="results-eyebrow">RANKED RESULTS</p>
@@ -271,7 +250,7 @@
             </div>
           </div>
           <div class="table-scroll" id="results" tabindex="0">
-            <table>
+            <table class="job-results-table">
               <thead>
                 <tr>
                   <th class="shortlist-heading" scope="col">
@@ -302,18 +281,27 @@
               <h2 id="map-heading">Commute origin</h2>
             </div>
             <div class="visualization-controls">
+              <div class="segmented-control pay-metric-toggle" role="group" aria-label="Albamon pay measure">
+                <button class="is-active" id="albamon-pay-hourly" type="button" aria-pressed="true">Hourly</button>
+                <button id="albamon-pay-total" type="button" aria-pressed="false">Shift total</button>
+              </div>
               <div class="segmented-control visualization-toggle" role="group" aria-label="Albamon visualization">
                 <button class="is-active" id="albamon-map-visual" type="button" aria-pressed="true">Map</button>
                 <button id="albamon-pareto-visual" type="button" aria-pressed="false">Pareto</button>
               </div>
-              <div class="map-legend" id="map-legend" aria-label="Map legend">
-                <span><i class="dot dot--ready"></i>Actionable</span>
-                <span><i class="dot dot--selected"></i>Selected</span>
-              </div>
-              <div class="chart-legend" id="albamon-chart-legend" aria-label="Pareto chart legend" hidden>
-                <span><i class="dot dot--ready"></i>Comparable</span>
-                <span><i class="dot dot--frontier"></i>Frontier</span>
-              </div>
+              <button class="chart-option-toggle is-active" id="albamon-group-overlaps" type="button" aria-pressed="true" title="Combine nearby chart points into numbered groups" hidden>Group overlaps</button>
+              <details class="visual-legend-disclosure">
+                <summary>Legend</summary>
+                <div class="map-legend" id="map-legend" aria-label="Map legend">
+                  <button class="legend-toggle is-active" id="albamon-marker-actionable" type="button" aria-pressed="true"><i class="dot dot--ready"></i>Actionable</button>
+                  <button class="legend-toggle is-active" id="albamon-marker-other" type="button" aria-pressed="true"><i class="dot dot--muted"></i>Other matches</button>
+                  <span><i class="dot dot--selected"></i>Selected</span>
+                </div>
+                <div class="chart-legend" id="albamon-chart-legend" aria-label="Pareto chart legend" hidden>
+                  <span><i class="dot dot--ready"></i>Comparable</span>
+                  <span><i class="dot dot--frontier"></i>Frontier</span>
+                </div>
+              </details>
             </div>
           </div>
           <div id="map" role="application" aria-label="Map of filtered Albamon worksites" hidden></div>
@@ -331,71 +319,10 @@
       </section>
 
       <section class="hotels-view" id="hotels-view" role="tabpanel" aria-labelledby="hotels-desk-tab" hidden>
-        <header class="hotel-hero">
-          <div>
-            <p class="eyebrow">SEPARATE WEEKEND-AGENCY REPORT</p>
-            <h2>Hotel agency Pareto frontier</h2>
-            <p>Compare each hotel’s best published rate against its verified commute from your selected origin. One hotel is efficient only when no other hotel pays at least as much with an equal or shorter commute.</p>
-          </div>
-        </header>
-
-        <section class="hotel-date-search" aria-labelledby="hotel-date-heading">
-          <div>
-            <p class="eyebrow">EXPLORE ANY DATES</p>
-            <h2 id="hotel-date-heading">Search every published shift in a date range</h2>
-            <p>The dashboard search is private exploration only. Discord remains fixed to <strong>Aug 29, Aug 30, Sep 5, and Sep 6</strong>.</p>
-          </div>
-          <form id="hotel-date-form">
-            <label class="field"><span>Start date</span><input id="hotel-start-date" type="date" required></label>
-            <label class="field"><span>End date</span><input id="hotel-end-date" type="date" required></label>
-            <button class="primary-button" id="hotel-date-submit" type="submit">Search cached dates</button>
-            <button class="secondary-button" id="hotel-date-refresh" type="button">Refresh sources</button>
-            <button class="secondary-button" id="hotel-date-reset" type="button">Show monitored report</button>
-          </form>
-          <p class="hotel-date-status" id="hotel-date-status" aria-live="polite">Showing the monitored report.</p>
-          <div class="operation-progress" id="hotel-operation-progress" hidden>
-            <div>
-              <strong id="hotel-operation-message">Starting search…</strong>
-              <span id="hotel-operation-detail"></span>
-            </div>
-            <progress id="hotel-operation-meter" max="100" value="0">0%</progress>
-            <button class="text-button" id="hotel-operation-cancel" type="button">Cancel</button>
-          </div>
-        </section>
-
-        <section class="hotel-result-filters" aria-labelledby="hotel-filter-heading">
-          <div class="filter-heading-row">
-            <div>
-              <p class="eyebrow">RESULT FILTERS</p>
-              <h2 id="hotel-filter-heading">Narrow the available shifts</h2>
-            </div>
-            <div class="saved-search-actions">
-              <label class="field field--saved-search"><span>Saved view</span><select id="hotel-saved-search"><option value="">Current filters</option></select></label>
-              <button class="secondary-button" id="hotel-save-search" type="button">Save</button>
-              <button class="text-button" id="hotel-delete-search" type="button">Delete</button>
-              <button class="secondary-button" id="hotel-share-search" type="button">Copy link</button>
-              <button class="text-button" id="hotel-clear-filters" type="button">Reset filters</button>
-            </div>
-          </div>
-          <div class="hotel-filters">
-            <label class="field field--search"><span>Hotel or provider</span><input id="hotel-search-filter" type="search" placeholder="Hotel, area, role, provider"></label>
-            <label class="field"><span>Available from</span><input id="hotel-filter-start-date" type="date"></label>
-            <label class="field"><span>Available through</span><input id="hotel-filter-end-date" type="date"></label>
-            <label class="field"><span>Shift starts after</span><input id="hotel-shift-start" type="time"></label>
-            <label class="field"><span>Shift ends before</span><input id="hotel-shift-end" type="time"></label>
-            <label class="field"><span>Max commute</span><select id="hotel-commute-filter"><option value="">Any / unknown</option><option value="20">20 min</option><option value="30">30 min</option><option value="40">40 min</option><option value="50">50 min</option><option value="60">60 min</option><option value="75">75 min</option><option value="90">90 min</option></select></label>
-            <label class="field"><span>Minimum hourly</span><select id="hotel-min-pay-filter"><option value="12000">₩12,000+</option><option value="13000">₩13,000+</option><option value="14000">₩14,000+</option><option value="15000">₩15,000+</option><option value="18000">₩18,000+</option><option value="0">Any eligible pay</option></select></label>
-            <label class="field"><span>Role</span><select id="hotel-role-filter"><option value="all">All roles</option></select></label>
-            <label class="field"><span>Provider</span><select id="hotel-provider-filter"><option value="all">All providers</option></select></label>
-          </div>
-          <p class="filter-feedback" id="hotel-filter-feedback" aria-live="polite"></p>
-        </section>
-
         <section class="hotel-summary" aria-label="Hotel report summary">
-          <article><strong id="hotel-summary-total">—</strong><span>Hotels compared</span></article>
           <article><strong id="hotel-summary-frontier">—</strong><span>On this frontier</span></article>
-          <article><strong id="hotel-summary-pay">—</strong><span>Highest frontier pay</span></article>
-          <article><strong id="hotel-summary-weekly">—</strong><span>Hotels stating 주휴 rate</span></article>
+          <article><strong id="hotel-summary-pay">—</strong><span id="hotel-summary-pay-label">Highest frontier hourly</span></article>
+          <article><strong id="hotel-summary-commute">—</strong><span>Shortest verified commute</span></article>
         </section>
 
         <section class="hotel-frontier-panel" aria-labelledby="hotel-frontier-heading">
@@ -403,41 +330,62 @@
             <div>
               <p class="eyebrow">PAY ↑ · COMMUTE ↓</p>
               <h2 id="hotel-frontier-heading">Efficient hotel choices</h2>
+              <p class="hotel-basis-note" id="hotel-basis-note" role="status">
+                Using actual/base hourly pay and the configured eligibility threshold.
+              </p>
             </div>
             <div class="hotel-controls">
-              <div class="segmented-control" role="group" aria-label="Pareto pay basis">
-                <button class="is-active" id="hotel-pay-actual" type="button" aria-pressed="true">Actual pay</button>
-                <button id="hotel-pay-weekly" type="button" aria-pressed="false">With 주휴*</button>
+              <div class="control-group">
+                <span class="control-label">Pay basis</span>
+                <div class="segmented-control" role="group" aria-label="Pareto pay basis">
+                  <button class="is-active" id="hotel-pay-actual" type="button" aria-pressed="true">Actual pay</button>
+                  <button id="hotel-pay-weekly" type="button" aria-pressed="false">With 주휴*</button>
+                </div>
+              </div>
+              <div class="control-group">
+                <span class="control-label">Compare</span>
+                <div class="segmented-control" role="group" aria-label="Hotel pay measure">
+                  <button class="is-active" id="hotel-pay-hourly" type="button" aria-pressed="true">Hourly</button>
+                  <button id="hotel-pay-total" type="button" aria-pressed="false">Shift total</button>
+                </div>
               </div>
             </div>
           </div>
 
-          <div class="hotel-basis-note" id="hotel-basis-note" role="status">
-            Using actual/base hourly pay. This is the reliable comparison and the ₩12,000 eligibility basis.
-          </div>
           <div class="source-warning" id="hotel-source-warning" hidden></div>
 
           <div class="hotel-frontier-layout">
-            <figure class="hotel-chart-card">
+            <div class="hotel-view-tabs" role="tablist" aria-label="Hotel result view">
+              <button class="view-tab is-active" id="hotel-list-tab" type="button" role="tab" aria-selected="true" aria-controls="hotel-table-card">List</button>
+              <button class="view-tab" id="hotel-visual-tab" type="button" role="tab" aria-selected="false" aria-controls="hotel-chart-card">Visual</button>
+            </div>
+            <figure class="hotel-chart-card" id="hotel-chart-card">
               <figcaption class="hotel-visual-heading">
-                <div>
+                <div class="visual-copy">
                   <strong id="hotel-visual-title">Pay versus commute</strong>
-                  <span id="hotel-visual-description">Hover for a summary; click any point to inspect every shift and provider.</span>
+                  <button class="visual-info-button" id="hotel-visual-info" type="button" aria-label="About this visualization" aria-describedby="hotel-visual-description">?</button>
+                  <span class="visual-help" id="hotel-visual-description" role="tooltip">Hotel points aggregate providers; switch to provider view to compare each source separately.</span>
                 </div>
                 <div class="visualization-controls">
                   <div class="segmented-control visualization-toggle" role="group" aria-label="Hotel visualization">
                     <button id="hotel-map-visual" type="button" aria-pressed="false">Map</button>
                     <button class="is-active" id="hotel-pareto-visual" type="button" aria-pressed="true">Pareto</button>
                   </div>
-                  <div class="chart-legend" id="hotel-chart-legend" aria-label="Hotel chart legend">
-                    <span><i class="dot dot--ready"></i>Comparable</span>
-                    <span><i class="dot dot--frontier"></i>Frontier</span>
+                  <div class="segmented-control plot-granularity-toggle" role="group" aria-label="Plot points as">
+                    <button class="is-active" id="hotel-granularity-hotel" type="button" aria-pressed="true">Hotels</button>
+                    <button id="hotel-granularity-provider" type="button" aria-pressed="false">Providers</button>
                   </div>
-                  <div class="map-legend" id="hotel-map-legend" aria-label="Hotel map legend" hidden>
-                    <span><i class="dot dot--ready"></i>Hotel</span>
-                    <span><i class="dot dot--frontier"></i>Frontier</span>
-                    <span><i class="dot dot--selected"></i>Selected</span>
-                  </div>
+                  <button class="chart-option-toggle is-active" id="hotel-group-overlaps" type="button" aria-pressed="true" title="Combine nearby chart points into numbered source groups">Group overlaps</button>
+                  <details class="visual-legend-disclosure">
+                    <summary>Legend</summary>
+                    <div class="chart-legend" id="hotel-chart-legend" aria-label="Hotel chart legend">
+                      <span><i class="dot dot--ready"></i>Comparable</span>
+                      <span><i class="dot dot--frontier"></i>Frontier</span>
+                    </div>
+                    <div class="map-legend" id="hotel-map-legend" aria-label="Hotel map legend" hidden>
+                      <span><i class="dot dot--ready"></i>Source colors load with hotel data</span>
+                    </div>
+                  </details>
                 </div>
               </figcaption>
               <div class="hotel-chart" id="hotel-chart" role="group" aria-label="Interactive scatter plot of hotel pay and verified commute">
@@ -452,19 +400,89 @@
               </div>
             </figure>
 
-            <section class="hotel-table-card" aria-labelledby="hotel-table-heading">
+            <section class="hotel-table-card" id="hotel-table-card" aria-labelledby="hotel-table-heading">
               <div class="hotel-table-heading">
                 <div>
                   <strong id="hotel-table-heading">All matching hotels</strong>
                   <span id="hotel-table-feedback" aria-live="polite">Loading the separate report…</span>
                 </div>
               </div>
+              <details class="filter-disclosure hotel-filter-disclosure hotel-controls-disclosure">
+                <summary>
+                  <span><strong>Search and filter shifts</strong><small id="hotel-filter-summary">Configured minimum · all monitored shifts</small></span>
+                  <span class="filter-summary-hint">Open controls</span>
+                </summary>
+                <div class="hotel-control-workspace">
+                  <div class="hotel-result-filters" aria-labelledby="hotel-filter-heading">
+                    <div class="filter-heading-row">
+                      <div>
+                        <p class="eyebrow">RESULT FILTERS</p>
+                        <h2 id="hotel-filter-heading">Narrow the available shifts</h2>
+                      </div>
+                      <button class="text-button" id="hotel-clear-filters" type="button">Reset filters</button>
+                    </div>
+                    <div class="hotel-filters hotel-filters--primary">
+                      <label class="field field--search"><span>Hotel or provider</span><input id="hotel-search-filter" type="search" placeholder="Hotel, area, role, provider"></label>
+                      <label class="field"><span>Available from</span><input id="hotel-filter-start-date" type="date"></label>
+                      <label class="field"><span>Available through</span><input id="hotel-filter-end-date" type="date"></label>
+                      <label class="field"><span>Max commute</span><select id="hotel-commute-filter"><option value="">Any / unknown</option><option value="20">20 min</option><option value="30">30 min</option><option value="40">40 min</option><option value="50">50 min</option><option value="60">60 min</option><option value="75">75 min</option><option value="90">90 min</option></select></label>
+                      <label class="field"><span>Minimum hourly</span><select id="hotel-min-pay-filter"><option value="">Configured minimum</option><option value="13000">₩13,000+</option><option value="14000">₩14,000+</option><option value="15000">₩15,000+</option><option value="18000">₩18,000+</option><option value="0">Any eligible pay</option></select></label>
+                    </div>
+                    <details class="advanced-filter-disclosure">
+                      <summary><strong>More filters and saved views</strong><small>Shift time, role, provider, and sharing</small></summary>
+                      <div class="advanced-filter-body">
+                        <div class="hotel-filters hotel-filters--advanced">
+                          <label class="field"><span>Shift starts after</span><input id="hotel-shift-start" type="time"></label>
+                          <label class="field"><span>Shift ends before</span><input id="hotel-shift-end" type="time"></label>
+                          <label class="field"><span>Role</span><select id="hotel-role-filter"><option value="all">All roles</option></select></label>
+                          <label class="field"><span>Provider</span><select id="hotel-provider-filter"><option value="all">All providers</option></select></label>
+                        </div>
+                        <div class="saved-search-actions">
+                          <label class="field field--saved-search"><span>Saved view</span><select id="hotel-saved-search"><option value="">Current filters</option></select></label>
+                          <button class="secondary-button" id="hotel-save-search" type="button">Save view</button>
+                          <button class="icon-button compact-icon-button" id="hotel-share-search" type="button" aria-label="Copy link to current hotel filters" title="Copy filter link">↗</button>
+                          <button class="text-button" id="hotel-delete-search" type="button" hidden>Delete saved view</button>
+                        </div>
+                      </div>
+                    </details>
+                    <p class="filter-feedback" id="hotel-filter-feedback" aria-live="polite"></p>
+                  </div>
+                  <details class="hotel-date-disclosure">
+                    <summary>
+                      <span><strong>Search a different date range</strong><small>Optional source search · does not change Discord monitoring</small></span>
+                      <span class="hotel-date-status" id="hotel-date-status" aria-live="polite">Showing the monitored report.</span>
+                    </summary>
+                    <div class="hotel-date-search" aria-labelledby="hotel-date-heading">
+                      <div>
+                        <p class="eyebrow">EXPLORE ANY DATES</p>
+                        <h2 id="hotel-date-heading">Search every published shift in a date range</h2>
+                        <p>The dashboard search is private exploration only. Discord remains fixed to <strong>Aug 29, Aug 30, Sep 5, and Sep 6</strong>.</p>
+                      </div>
+                      <form id="hotel-date-form">
+                        <label class="field"><span>Start date</span><input id="hotel-start-date" type="date" required></label>
+                        <label class="field"><span>End date</span><input id="hotel-end-date" type="date" required></label>
+                        <button class="primary-button" id="hotel-date-submit" type="submit">Search cached dates</button>
+                        <button class="secondary-button" id="hotel-date-refresh" type="button">Refresh sources</button>
+                        <button class="secondary-button" id="hotel-date-reset" type="button">Show monitored report</button>
+                      </form>
+                      <div class="operation-progress" id="hotel-operation-progress" hidden>
+                        <div>
+                          <strong id="hotel-operation-message">Starting search…</strong>
+                          <span id="hotel-operation-detail"></span>
+                        </div>
+                        <progress id="hotel-operation-meter" max="100" value="0">0%</progress>
+                        <button class="text-button" id="hotel-operation-cancel" type="button">Cancel</button>
+                      </div>
+                    </div>
+                  </details>
+                </div>
+              </details>
               <div class="hotel-table-scroll">
-                <table>
+                <table class="hotel-results-table">
                   <thead>
                     <tr>
                       <th scope="col">Hotel</th>
-                      <th scope="col">Comparable pay</th>
+                      <th scope="col" id="hotel-comparable-heading">Work-hour pay</th>
                       <th scope="col">Actual / 주휴*</th>
                       <th scope="col">Commute</th>
                       <th scope="col">Options</th>
@@ -483,30 +501,33 @@
           <p class="hotel-footnote">* 주휴 적용 시급 is conditional on satisfying the agency’s statutory/advertised eligibility. Where no 주휴 rate is published, the “With 주휴” comparison conservatively retains actual pay and labels it as an actual-pay fallback.</p>
         </section>
 
-        <section class="agency-catalog-panel" aria-labelledby="agency-catalog-heading">
-          <div class="agency-catalog-heading">
+        <details class="agency-catalog-panel" id="agency-catalog-panel" aria-labelledby="agency-catalog-heading">
+          <summary class="agency-catalog-heading">
             <div>
               <p class="eyebrow">AGENCY COVERAGE GUIDE</p>
               <h2 id="agency-catalog-heading">Known hotel staffing networks</h2>
             </div>
+            <span>Reference coverage and source health</span>
+          </summary>
+          <div class="agency-catalog-content">
+            <p class="agency-catalog-note">Coverage badges distinguish successful public feeds, configured feeds awaiting dated listings, deliberately disabled low-yield sources, and agencies whose exact schedules remain login-gated.</p>
+            <details class="source-health-panel">
+              <summary>Source health and freshness</summary>
+              <div class="source-health-grid" id="hotel-source-health"></div>
+            </details>
+            <div class="agency-catalog-scroll">
+              <table>
+                <thead>
+                  <tr>
+                    <th scope="col">Agency</th>
+                    <th scope="col">Known hotels / specialties</th>
+                  </tr>
+                </thead>
+                <tbody id="agency-catalog-rows"></tbody>
+              </table>
+            </div>
           </div>
-          <p class="agency-catalog-note">Coverage badges distinguish successful public feeds, configured feeds awaiting dated listings, deliberately disabled low-yield sources, and agencies whose exact schedules remain login-gated.</p>
-          <details class="source-health-panel">
-            <summary>Source health and freshness</summary>
-            <div class="source-health-grid" id="hotel-source-health"></div>
-          </details>
-          <div class="agency-catalog-scroll">
-            <table>
-              <thead>
-                <tr>
-                  <th scope="col">Agency</th>
-                  <th scope="col">Known hotels / specialties</th>
-                </tr>
-              </thead>
-              <tbody id="agency-catalog-rows"></tbody>
-            </table>
-          </div>
-        </section>
+        </details>
       </section>
     </main>
 
@@ -544,6 +565,7 @@
         <div><p class="eyebrow">SAME POSITION</p><h2 id="point-choice-title">Choose a result</h2></div>
         <button class="icon-button" id="close-point-choice" type="button" aria-label="Close point choices"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button>
       </div>
+      <div class="point-choice-legend" id="point-choice-legend" aria-label="Sources in this point group" hidden></div>
       <div class="point-choice-list" id="point-choice-list"></div>
     </dialog>
 

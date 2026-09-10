@@ -51,6 +51,7 @@ try:
         shift_fits_availability,
     )
     from tools.albamon_runtime import atomic_text_writer, atomic_write_text
+    from tools.jobscout_config import SETTINGS
 except ModuleNotFoundError:  # Support direct execution from the repository root.
     from albamon_cache import (
         DEFAULT_APPLIED_REFRESH_HOURS,
@@ -83,6 +84,7 @@ except ModuleNotFoundError:  # Support direct execution from the repository root
         shift_fits_availability,
     )
     from albamon_runtime import atomic_text_writer, atomic_write_text
+    from jobscout_config import SETTINGS
 
 
 SUMMER_URL = (
@@ -96,10 +98,14 @@ DEFAULT_APPLIED_HISTORY_PATH = Path("tools/albamon_applied_jobs.json")
 DEFAULT_SPECIAL_SOURCE_CACHE_PATH = Path(
     "artifacts/albamon/cache/special_sources.json"
 )
-DEFAULT_SPECIAL_SOURCE_CACHE_HOURS = 4
+DEFAULT_SPECIAL_SOURCE_CACHE_HOURS = SETTINGS.cache.special_source_hours
 SPECIAL_SOURCE_CACHE_VERSION = 3
-SPECIAL_SOURCE_NAMES = ("summer", "urgent", "remote", "station_safety")
-DEFAULT_AVAILABILITY_END_DATE = date(2026, 9, 9)
+_SPECIAL_SOURCE_OPTIONS = ("summer", "urgent", "remote", "station_safety")
+SPECIAL_SOURCE_NAMES = tuple(
+    source for source in _SPECIAL_SOURCE_OPTIONS
+    if source in SETTINGS.albamon.enabled_sources
+)
+DEFAULT_AVAILABILITY_END_DATE = SETTINGS.albamon.availability_end_date
 TITLE_SINGLE_DAY_SIGNAL_RE = re.compile(
     r"(?:당일\s*(?:알바|근무|업무|스태프|직원|모집)|"
     r"(?:하루|1\s*일)\s*(?:만|단기|알바|근무|업무|스태프|가능)|"
@@ -112,89 +118,53 @@ SEOUL_DISTRICTS = (
     "서초구", "성동구", "성북구", "송파구", "양천구", "영등포구", "용산구",
     "은평구", "종로구", "중구", "중랑구",
 )
-TARGET_DISTRICTS = SEOUL_DISTRICTS
+TARGET_DISTRICTS = SETTINGS.albamon.target_districts
 SEOUL_ALL_AREAS = [
     {"si": "I000", "gu": "", "dong": "", "name": "서울 전체"}
 ]
+_EVENING_AREA_CATALOG = {
+    "강남구": {"si": "I000", "gu": "I010", "dong": "", "name": "강남구 전체"},
+    "서초구": {"si": "I000", "gu": "I150", "dong": "", "name": "서초구 전체"},
+    "송파구": {"si": "I000", "gu": "I180", "dong": "", "name": "송파구 전체"},
+}
 EVENING_CORRIDOR_AREAS = [
-    {"si": "I000", "gu": "I010", "dong": "", "name": "강남구 전체"},
-    {"si": "I000", "gu": "I150", "dong": "", "name": "서초구 전체"},
-    {"si": "I000", "gu": "I180", "dong": "", "name": "송파구 전체"},
+    copy.deepcopy(_EVENING_AREA_CATALOG[district])
+    for district in SETTINGS.albamon.evening.districts
 ]
-EVENING_CORRIDOR_DISTRICTS = {"강남구", "서초구", "송파구"}
-EVENING_CORRIDOR_STATIONS = (
-    "역삼역",
-    "강남역",
-    "송파역",
-    "잠실역",
-    "잠실새내역",
-    "삼성역",
+EVENING_CORRIDOR_DISTRICTS = set(SETTINGS.albamon.evening.districts)
+EVENING_CORRIDOR_STATIONS = SETTINGS.albamon.evening.stations
+TARGET_SUBWAY_STATIONS = tuple(
+    {
+        "areaCode": station.area_code,
+        "subwayLineCode": station.line_code,
+        "stationCode": station.station_code,
+        "name": station.name.removesuffix("역"),
+        "latitude": station.latitude,
+        "longitude": station.longitude,
+    }
+    for station in SETTINGS.albamon.evening.station_definitions
 )
-TARGET_SUBWAY_STATIONS = (
-    {
-        "areaCode": "1",
-        "subwayLineCode": "102",
-        "stationCode": "10214",
-        "name": "역삼",
-        "latitude": 37.5007176207,
-        "longitude": 127.0366187692,
-    },
-    {
-        "areaCode": "1",
-        "subwayLineCode": "102",
-        "stationCode": "10215",
-        "name": "강남",
-        "latitude": 37.498164651,
-        "longitude": 127.0283079009,
-    },
-    {
-        "areaCode": "1",
-        "subwayLineCode": "108",
-        "stationCode": "10807",
-        "name": "송파",
-        "latitude": 37.4996861343,
-        "longitude": 127.1121798926,
-    },
-    {
-        "areaCode": "1",
-        "subwayLineCode": "102",
-        "stationCode": "10209",
-        "name": "잠실",
-        "latitude": 37.5133199977,
-        "longitude": 127.100314732,
-    },
-    {
-        "areaCode": "1",
-        "subwayLineCode": "102",
-        "stationCode": "10210",
-        "name": "잠실새내",
-        "latitude": 37.5115686515,
-        "longitude": 127.0863730771,
-    },
-    {
-        "areaCode": "1",
-        "subwayLineCode": "102",
-        "stationCode": "10212",
-        "name": "삼성",
-        "latitude": 37.5088623566,
-        "longitude": 127.0630752722,
-    },
+EVENING_STATION_AREA_LIMIT_MINUTES = (
+    SETTINGS.albamon.evening.station_walk_limit_minutes
 )
-EVENING_STATION_AREA_LIMIT_MINUTES = 20
-REMOTE_MIN_HOURLY_WON = 10_320
+REMOTE_MIN_HOURLY_WON = SETTINGS.albamon.remote_minimum_hourly_won
 REMOTE_PRIVACY_OR_SCAM_RE = re.compile(
     r"방\s*사진|사진\s*제출|영상\s*데이터|행동\s*영상|얼굴\s*(?:촬영|사진)|"
     r"보험|회원\s*가입|계정\s*(?:생성|대여)|수수료|선입금|홍보\s*(?:요원|알바)|"
     r"리워드|온라인\s*조사|설문\s*조사"
 )
-REQUESTED_WORK_PERIOD_TYPES = [
-    {"key": "ONE_DAY", "value": "5", "description": "하루(1일)"},
-    {"key": "LESS_THAN_ONE_WEEK", "value": "10", "description": "1주일이하"},
-    {
-        "key": "ONE_WEEK_TO_ONE_MONTH",
-        "value": "20",
-        "description": "1주일~1개월",
+_WORK_PERIOD_CATALOG = {
+    "one_day": {"key": "ONE_DAY", "value": "5", "description": "하루(1일)"},
+    "under_one_week": {
+        "key": "LESS_THAN_ONE_WEEK", "value": "10", "description": "1주일이하"
     },
+    "one_week_to_one_month": {
+        "key": "ONE_WEEK_TO_ONE_MONTH", "value": "20", "description": "1주일~1개월"
+    },
+}
+REQUESTED_WORK_PERIOD_TYPES = [
+    copy.deepcopy(_WORK_PERIOD_CATALOG[name])
+    for name in SETTINGS.albamon.work_periods
 ]
 REQUESTED_WORK_PERIOD_LABELS = {
     item["description"] for item in REQUESTED_WORK_PERIOD_TYPES
@@ -203,66 +173,36 @@ LATE_NIGHT_WORK_PERIOD_TYPES = copy.deepcopy(REQUESTED_WORK_PERIOD_TYPES)
 LATE_NIGHT_WORK_PERIOD_LABELS = {
     item["description"] for item in LATE_NIGHT_WORK_PERIOD_TYPES
 }
-TEMPORARY_SINGLE_DAY_ACTIVE_DATES = {
-    date(2026, 8, 13),
-    date(2026, 8, 14),
-}
-TEMPORARY_SINGLE_DAY_TARGET_DATES = {
-    date(2026, 8, 15),
-    date(2026, 8, 17),
-}
-TEMPORARY_SINGLE_DAY_LANE = "aug_15_17_single_day"
+TEMPORARY_SINGLE_DAY_ACTIVE_DATES = set(
+    SETTINGS.albamon.temporary_single_day.active_dates
+)
+TEMPORARY_SINGLE_DAY_TARGET_DATES = set(
+    SETTINGS.albamon.temporary_single_day.target_dates
+)
+TEMPORARY_SINGLE_DAY_LANE = "temporary_single_day"
 WORK_PERIOD_MINIMUM_DAYS = {
     "하루(1일)": 1,
     "1주일이하": 1,
     "1주일~1개월": 7,
 }
-# Approximate proximity bands, centered on the user's preferred 강남구/송파구
-# area. These are ranking weights, not claims about exact transit time.
-DISTRICT_PROXIMITY_PENALTIES = {
-    "강남구": 0,
-    "송파구": 0,
-    "서초구": -2,
-    "강동구": -2,
-    "광진구": -3,
-    "성동구": -3,
-    "동작구": -5,
-    "용산구": -5,
-    "중구": -5,
-    "관악구": -6,
-    "동대문구": -6,
-    "성북구": -6,
-    "영등포구": -8,
-    "종로구": -8,
-    "중랑구": -8,
-    "구로구": -10,
-    "금천구": -10,
-    "마포구": -10,
-    "서대문구": -10,
-    "양천구": -12,
-    "강북구": -12,
-    "노원구": -12,
-    "강서구": -14,
-    "은평구": -14,
-    "도봉구": -14,
-}
+# Ranking weights are user-taste settings, not claims about exact transit time.
+DISTRICT_PROXIMITY_PENALTIES = dict(SETTINGS.ranking.district_penalties)
+COMBINED_TIER_A_MINIMUM, COMBINED_TIER_B_MINIMUM, COMBINED_TIER_C_MINIMUM = (
+    SETTINGS.ranking.combined_tier_minimums
+)
 SOURCE_LABELS = {
     "suit": "맞춤알바",
     "multi_slot": "1일 선택근무",
-    "late_night": "강남·송파 역세권 저녁",
+    "late_night": "·".join(SETTINGS.albamon.evening.districts) + " 역세권 저녁",
     "summer": "여름알바",
     "urgent": "급구알바",
     "remote": "재택알바",
-    "station_safety": "6개 선호역 안전망",
+    "station_safety": f"{len(EVENING_CORRIDOR_STATIONS)}개 설정역 안전망",
 }
-SOURCE_ORDER = (
-    "suit",
-    "multi_slot",
-    "late_night",
-    "station_safety",
-    "remote",
-    "summer",
-    "urgent",
+SOURCE_ORDER = tuple(
+    "late_night" if source == "evening" else source
+    for source in SETTINGS.albamon.enabled_sources
+    if source != "evening" or SETTINGS.albamon.evening.enabled
 )
 ADULT_RESTRICTED_TEXT = "성인인증이 필요한 공고"
 CLOSED_POSTING_ERROR_CODES = {"RCRV005", "RCRV006"}
@@ -271,23 +211,28 @@ CLINICAL_STUDY_REVIEW_REASON = (
     "as Saturday-and-Sunday-only"
 )
 UTILITY_MODEL = {
-    "purpose": "Prioritize practical weekend applications for the user's stated preferences",
+    "purpose": "Prioritize practical applications using the configured schedule and commute policy",
     "neutral_factors": [
         "Shift end time, including before/after 17:00 and overnight work",
     ],
-    "tier_thresholds": {"A": 95, "B": 82, "C": 68, "D": 0},
+    "tier_thresholds": {
+        "A": COMBINED_TIER_A_MINIMUM,
+        "B": COMBINED_TIER_B_MINIMUM,
+        "C": COMBINED_TIER_C_MINIMUM,
+        "D": 0,
+    },
     "important_factors": [
         "verified weekend schedule",
         "verified short commitment",
         "advertised pay",
-        "district proximity to Gangnam/Songpa",
+        "configured district fit",
         "hard-requirement burden",
         "application friction",
         "summer cold-work usefulness for B-Mart",
         "actual-center uncertainty for Coupang",
     ],
     "district_proximity_penalties": DISTRICT_PROXIMITY_PENALTIES,
-    "confirmed_applicant_facts": ["Health certificate (보건증) held"],
+    "confirmed_applicant_facts": [],
 }
 
 
@@ -344,7 +289,9 @@ def build_multi_slot_condition(saved_condition: dict[str, Any]) -> dict[str, Any
 
     filtered = apply_saved_preferences(saved_condition, saved_condition)
     condition = filtered["condition"]
-    condition["workPeriodTypes"] = [copy.deepcopy(REQUESTED_WORK_PERIOD_TYPES[0])]
+    condition["workPeriodTypes"] = [
+        copy.deepcopy(_WORK_PERIOD_CATALOG["one_day"])
+    ]
     condition["workWeekTypes"] = []
     condition["workDayTypes"] = []
     condition["excludeNegoWorkWeek"] = False
@@ -352,7 +299,7 @@ def build_multi_slot_condition(saved_condition: dict[str, Any]) -> dict[str, Any
 
 
 def build_late_night_condition(saved_condition: dict[str, Any]) -> dict[str, Any]:
-    """Collect corridor jobs for a separate 19:00-02:00 availability lane.
+    """Collect corridor jobs for the configured evening availability lane.
 
     Weekday constraints are removed, but the source is limited to Albamon's
     one-day through one-month buckets. Exact shift containment, the rolling
@@ -388,7 +335,7 @@ def build_remote_condition(
 def build_station_safety_condition(
     source_condition: dict[str, Any], saved_condition: dict[str, Any]
 ) -> dict[str, Any]:
-    """Collect short-term listings tagged to one of the six preferred stations."""
+    """Collect short-term listings tagged to a configured preferred station."""
 
     filtered = apply_saved_preferences(source_condition, saved_condition)
     condition = filtered["condition"]
@@ -496,17 +443,24 @@ def collect_source_jobs(
     include_late_night: bool = True,
 ) -> tuple[dict[str, Any], dict[str, list[dict[str, Any]]], dict[str, int]]:
     started = time.perf_counter()
+    if suit_no <= 0:
+        raise ValueError(
+            "Albamon saved search is not configured. Copy "
+            "config/jobscout.local.example.toml to config/jobscout.local.toml "
+            "and set albamon.saved_search_id before refreshing."
+        )
     saved = fetch_saved_condition(suit_no)
     cached_special = load_special_source_cache(
         special_source_cache,
         saved,
         max_age_hours=special_source_cache_hours,
     )
-    conditions = {
-        "suit": apply_saved_preferences(saved, saved),
-        "multi_slot": build_multi_slot_condition(saved),
-    }
-    if include_late_night:
+    conditions: dict[str, dict[str, Any]] = {}
+    if "suit" in SOURCE_ORDER:
+        conditions["suit"] = apply_saved_preferences(saved, saved)
+    if "multi_slot" in SOURCE_ORDER:
+        conditions["multi_slot"] = build_multi_slot_condition(saved)
+    if include_late_night and "late_night" in SOURCE_ORDER:
         conditions["late_night"] = build_late_night_condition(saved)
     source_jobs: dict[str, list[dict[str, Any]]] = (
         dict(cached_special[0]) if cached_special else {}
@@ -514,15 +468,17 @@ def collect_source_jobs(
     source_totals: dict[str, int] = (
         dict(cached_special[1]) if cached_special else {}
     )
-    if cached_special is None:
+    if cached_special is None and SPECIAL_SOURCE_NAMES:
+        source_urls = {
+            "summer": SUMMER_URL,
+            "urgent": URGENT_URL,
+            "remote": REMOTE_URL,
+            "station_safety": SUBWAY_URL,
+        }
         with ThreadPoolExecutor(max_workers=len(SPECIAL_SOURCE_NAMES)) as executor:
             condition_futures = {
-                "summer": executor.submit(fetch_page_condition, SUMMER_URL),
-                "urgent": executor.submit(fetch_page_condition, URGENT_URL),
-                "remote": executor.submit(fetch_page_condition, REMOTE_URL),
-                "station_safety": executor.submit(
-                    fetch_page_condition, SUBWAY_URL
-                ),
+                source: executor.submit(fetch_page_condition, source_urls[source])
+                for source in SPECIAL_SOURCE_NAMES
             }
             for source, future in condition_futures.items():
                 source_condition = future.result()
@@ -539,7 +495,11 @@ def collect_source_jobs(
                         source_condition, saved
                     )
     with GeneralApiClient() as api_client:
-        with ThreadPoolExecutor(max_workers=len(conditions)) as executor:
+        if conditions:
+            executor_workers = min(len(conditions), SETTINGS.albamon.workers)
+        else:
+            executor_workers = 1
+        with ThreadPoolExecutor(max_workers=executor_workers) as executor:
             futures = {
                 executor.submit(
                     fetch_all_search_jobs,
@@ -556,7 +516,7 @@ def collect_source_jobs(
                 source_jobs[source] = jobs
                 source_totals[source] = total
         cache_write_errors = 0
-        if cached_special is None:
+        if cached_special is None and SPECIAL_SOURCE_NAMES:
             try:
                 write_special_source_cache(
                     special_source_cache,
@@ -1073,7 +1033,7 @@ def availability_window_exclusion_reasons(
     as_of: date,
     availability_end: date,
 ) -> list[str]:
-    """Reject work that cannot finish inside today's Sep 9 availability window."""
+    """Reject work that cannot finish inside the configured availability window."""
 
     if as_of > availability_end:
         return [f"availability window ended on {availability_end.isoformat()}"]
@@ -1177,10 +1137,12 @@ def late_night_exclusion_reasons(
     reasons: list[str] = []
     if record.get("target_district") not in EVENING_CORRIDOR_DISTRICTS:
         reasons.append(
-            "verified worksite is outside the Gangnam-Seocho-Songpa corridor"
+            "verified worksite is outside the configured evening corridor"
         )
     if not record.get("late_night_compatible"):
-        reasons.append("no advertised shift fits fully within 19:00-02:00")
+        reasons.append(
+            f"no advertised shift fits fully within {LATE_NIGHT_AVAILABILITY}"
+        )
     work_period = str(record.get("work_period") or "").strip()
     if work_period not in LATE_NIGHT_WORK_PERIOD_LABELS:
         reasons.append(
@@ -1292,7 +1254,8 @@ def remote_exclusion_reasons(
         or schedule_is_flexible
     ):
         reasons.append(
-            "remote schedule is not verified as weekend, 19:00-02:00, or fully flexible"
+            "remote schedule is not verified as weekend, "
+            f"{LATE_NIGHT_AVAILABILITY}, or fully flexible"
         )
     return reasons
 
@@ -1300,16 +1263,22 @@ def remote_exclusion_reasons(
 def temporary_single_day_exclusion_reasons(
     record: dict[str, Any], *, as_of: date
 ) -> list[str]:
-    """Apply hard filters to the self-expiring Aug 15/17 one-day lane."""
+    """Apply hard filters to the configured self-expiring one-day lane."""
 
+    if not TEMPORARY_SINGLE_DAY_ACTIVE_DATES:
+        return ["temporary one-day search is disabled in configuration"]
     if as_of not in TEMPORARY_SINGLE_DAY_ACTIVE_DATES:
-        return ["temporary Aug 15/17 search is active only on Aug 13-14, 2026"]
+        active_dates = ", ".join(
+            sorted(value.isoformat() for value in TEMPORARY_SINGLE_DAY_ACTIVE_DATES)
+        )
+        return [f"temporary one-day search is active only on {active_dates}"]
     target_values = {
         target.isoformat() for target in TEMPORARY_SINGLE_DAY_TARGET_DATES
     }
     options = set(record.get("target_date_options") or []) & target_values
     if not options:
-        return ["no independently selectable Aug 15 or Aug 17 work date verified"]
+        targets = ", ".join(sorted(target_values)) or "a configured target date"
+        return [f"no independently selectable target date verified ({targets})"]
 
     reasons: list[str] = []
     if not record.get("target_district"):
@@ -1521,13 +1490,13 @@ def assess_utility(record: dict[str, Any]) -> tuple[int, str, list[str], list[st
         proximity_penalty = DISTRICT_PROXIMITY_PENALTIES[district]
         record["district_proximity_penalty"] = proximity_penalty
         record["district_proximity_basis"] = (
-            "approximate Seoul district proximity to Gangnam/Songpa; "
+            "configured Seoul district fit; "
             "not exact transit time"
         )
         if proximity_penalty:
             adjust(
                 proximity_penalty,
-                f"{district} is farther from Gangnam/Songpa",
+                f"{district} has a configured fit penalty",
                 caution=True,
             )
         else:
@@ -1539,12 +1508,15 @@ def assess_utility(record: dict[str, Any]) -> tuple[int, str, list[str], list[st
         "songpa_late_night" in eligibility_lanes
         and "weekend_short_term" not in eligibility_lanes
     ):
-        adjust(10, "advertised shift fits the station-corridor 19:00-02:00 availability")
+        adjust(
+            10,
+            f"advertised shift fits the station-corridor {LATE_NIGHT_AVAILABILITY} availability",
+        )
     elif (
         TEMPORARY_SINGLE_DAY_LANE in eligibility_lanes
         and "weekend_short_term" not in eligibility_lanes
     ):
-        adjust(10, "exact Aug 15/17 one-day option is detail-verified")
+        adjust(10, "configured one-day target option is detail-verified")
     elif weekend_basis.startswith("weekend") or weekend_basis == "explicit weekdays":
         adjust(10, "weekend schedule is explicit")
     else:
@@ -1628,11 +1600,11 @@ def assess_utility(record: dict[str, Any]) -> tuple[int, str, list[str], list[st
         if record.get("duplicate_listing_count", 1) >= 20:
             adjust(-5, "high-volume repeated campaign", caution=True)
 
-    if score >= 95:
+    if score >= COMBINED_TIER_A_MINIMUM:
         tier = "A"
-    elif score >= 82:
+    elif score >= COMBINED_TIER_B_MINIMUM:
         tier = "B"
-    elif score >= 68:
+    elif score >= COMBINED_TIER_C_MINIMUM:
         tier = "C"
     else:
         tier = "D"
@@ -2189,7 +2161,7 @@ def write_combined_markdown(path: Path, report: dict[str, Any]) -> None:
         "# Albamon combined 맞춤 · 역세권 · 재택 · 여름 · 급구 report",
         "",
         f"Generated: {report['generated_at']}",
-        "Target area: all 25 Seoul districts",
+        "Target districts: " + ", ".join(report.get("target_districts") or []),
         "Weekend rule: weekend-only (Saturday and/or Sunday), including negotiable schedules only when the posting verifies a weekend option.",
         (
             "Availability rule: work must fit from "
@@ -2197,18 +2169,39 @@ def write_combined_markdown(path: Path, report: dict[str, Any]) -> None:
             f"{report.get('availability_end_date')} inclusive. Fixed work terms "
             "ending later and minimum commitments that cannot fit are excluded."
         ),
-        "Duration collection: one day, under one week, and one week to one month; Albamon's one-to-three-month bucket is no longer collected.",
-        "Station-corridor evening lane: weekday is unrestricted, the same availability deadline applies, and a detail-verified shift must fit fully within 19:00–02:00. Final eligibility requires the worksite to fall within the conservative 20-minute walking-radius estimate of a preferred station; the home commute is checked separately.",
-        "Temporary Aug 15/17 lane: active only on Aug 13–14, 2026; requires a verified one-day posting where Aug 15 or Aug 17 can be selected independently.",
+        "Duration collection: "
+        + ", ".join(
+            item["description"] for item in REQUESTED_WORK_PERIOD_TYPES
+        )
+        + ".",
+        (
+            "Station-corridor evening lane: weekday is unrestricted, the same "
+            "availability deadline applies, and a detail-verified shift must fit "
+            f"fully within {LATE_NIGHT_AVAILABILITY}. Final eligibility requires "
+            f"the worksite to fall within the conservative {EVENING_STATION_AREA_LIMIT_MINUTES}-minute "
+            "walking-radius estimate of a configured station; the origin commute "
+            "is checked separately."
+        ),
+        (
+            "Temporary one-day lane: active dates "
+            + (", ".join(sorted(value.isoformat() for value in TEMPORARY_SINGLE_DAY_ACTIVE_DATES)) or "none")
+            + "; independently selectable targets "
+            + (", ".join(sorted(value.isoformat() for value in TEMPORARY_SINGLE_DAY_TARGET_DATES)) or "none")
+            + "."
+        ),
         f"Work-term cutoff: jobs ending before {report.get('work_term_cutoff_date') or report['generated_at'][:10]} are excluded; same-day jobs remain until their last exact advertised shift starts.",
-        "Demographics: male age 26, including unrestricted listings; education is recorded as a hard requirement rather than silently assumed.",
+        (
+            f"Demographic metadata: age {SETTINGS.albamon.requested_age}, "
+            f"gender {SETTINGS.albamon.requested_gender}; education remains a "
+            "posting requirement rather than an inferred applicant fact."
+        ),
         f"Source results after API filters: {report['source_counts_text']}",
         f"Unique recruit IDs inspected: {report['unique_candidate_count']}",
         f"Eligible non-logistics jobs: {len(normal_jobs)}",
         f"Eligible logistics groups: {len(logistics_jobs)}",
         f"Eligible station-corridor evening candidates before commute screening: {report.get('eligible_late_night_count', len(late_night_jobs))}",
         f"Eligible short-term remote jobs: {report.get('eligible_remote_count', len(remote_jobs))}",
-        f"Eligible Aug 15/17 one-day jobs: {report.get('eligible_temporary_single_day_count', len(temporary_single_day_jobs))}",
+        f"Eligible configured one-day target jobs: {report.get('eligible_temporary_single_day_count', len(temporary_single_day_jobs))}",
         f"Not yet applied: {len(actionable_jobs)}",
         f"Already applied: {len(already_applied_jobs)}",
         f"Authenticated application history checked: {report.get('application_history_checked_at') or 'not checked'}",
@@ -2219,9 +2212,18 @@ def write_combined_markdown(path: Path, report: dict[str, Any]) -> None:
         f"Detail candidates after safe early screening/dedup: {report.get('detail_candidate_count', report['unique_candidate_count'])}",
         f"Detail cache hits: {(report.get('performance') or {}).get('detail_cache_hits', 0)}",
         f"Detail network jobs: {(report.get('performance') or {}).get('detail_network_jobs', report['unique_candidate_count'])}",
-        "Source verification: 여름알바, 급구알바, 재택알바, and the exact six-station safety net are collected with the same short-term preferences where applicable. Detail screening remains authoritative because negotiated schedules and advertised locations are broad.",
+        "Source verification: enabled safety-net tabs are collected with the same "
+        "configured short-term preferences where applicable. Detail screening "
+        "remains authoritative because negotiated schedules and advertised "
+        "locations are broad.",
         f"Source parity: {(report.get('source_parity') or {}).get('multi_source_count', 0)} postings appeared in multiple source tabs; exclusive counts are retained in JSON for regression detection.",
-        "Utility ranking: schedule certainty, short commitment, pay, district proximity to Gangnam/Songpa, hard requirements, application friction, summer cold-work usefulness, and logistics-location certainty. Shift end time is neutral except that 19:00–02:00 containment is required for the station-corridor evening lane. District collection is only a prefilter; the unified report applies the conservative 20-minute station-area walking estimate and verifies the home commute separately.",
+        "Utility ranking: schedule certainty, short commitment, pay, configured "
+        "district fit, hard requirements, application friction, summer cold-work "
+        "usefulness, and logistics-location certainty. Shift end time is neutral "
+        f"except that {LATE_NIGHT_AVAILABILITY} containment is required for the "
+        "station-corridor evening lane. District collection is only a prefilter; "
+        "the unified report applies the configured station-area walking estimate "
+        "and verifies the origin commute separately.",
         "",
         "## Recommended application order",
         "",
@@ -2263,9 +2265,9 @@ def write_combined_markdown(path: Path, report: dict[str, Any]) -> None:
     lines.extend(
         [
             "",
-            "## Aug 15/17 one-day matches — one date can be worked independently",
+            "## Configured one-day matches — one date can be worked independently",
             "",
-            "> This temporary lane runs only on Aug 13–14, 2026 and expires automatically.",
+            "> This temporary lane runs only on its configured active dates and expires automatically.",
             "",
         ]
     )
@@ -2296,7 +2298,10 @@ def write_combined_markdown(path: Path, report: dict[str, Any]) -> None:
     lines.extend(
         [
             "",
-            "## Station-corridor evening candidates — 19:00–02:00 shift; 20-minute station-area estimate checked in unified report",
+            "## Station-corridor evening candidates — "
+            f"{LATE_NIGHT_AVAILABILITY} shift; "
+            f"{EVENING_STATION_AREA_LIMIT_MINUTES}-minute station-area estimate "
+            "checked in unified report",
             "",
             f"> Weekday is unrestricted, but all required work must finish by {report.get('availability_end_date')}. Confirm transport home using the exact advertised shift.",
             "",
@@ -2364,7 +2369,7 @@ def write_combined_markdown(path: Path, report: dict[str, Any]) -> None:
                     f"- Area: {escape_markdown(record['area'])}",
                     f"- Schedule: {escape_markdown(record['work_week'] or record['work_days'])}; {escape_markdown(record['work_time'])}",
                     f"- Matching night options: {escape_markdown('; '.join(record.get('late_night_shift_options') or []) or 'None')}",
-                    f"- Matching Aug 15/17 options: {escape_markdown(', '.join(record.get('target_date_options') or []) or 'None')}",
+                    f"- Matching configured date options: {escape_markdown(', '.join(record.get('target_date_options') or []) or 'None')}",
                     f"- Pay: {escape_markdown(record['salary_type'])} {escape_markdown(record['salary'])}",
                     f"- Ends before {report['end_time_threshold']}: {before_threshold_label(record)}",
                     f"- Commitment: {escape_markdown(record['duration_requirement'])}",
@@ -2617,7 +2622,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--exclude-late-night",
         action="store_true",
-        help="Omit the separate station-corridor 19:00-02:00 evening lane.",
+        help="Omit the separately configured station-corridor evening lane.",
     )
     parser.add_argument(
         "--manual-reviews", type=Path, default=DEFAULT_MANUAL_REVIEWS_PATH
@@ -2861,7 +2866,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         record["station_safety_area_basis"] = station_proximity["basis"]
         if station_only and not station_proximity["eligible"]:
             regular_reasons.append(
-                "station safety-net worksite is outside the 20-minute target: "
+                "station safety-net worksite is outside the "
+                f"{EVENING_STATION_AREA_LIMIT_MINUTES}-minute target: "
                 + station_proximity["basis"]
             )
         late_night_candidate = bool(
@@ -2880,7 +2886,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             and not station_proximity["eligible"]
         ):
             night_reasons.append(
-                "worksite is outside the 20-minute target-station estimate: "
+                "worksite is outside the "
+                f"{EVENING_STATION_AREA_LIMIT_MINUTES}-minute target-station estimate: "
                 + station_proximity["basis"]
             )
         remote_candidate = "remote" in source_set
@@ -2930,7 +2937,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 if reason not in regular_reasons
             )
             record["exclusion_reasons"].extend(
-                f"Aug 15/17 single-day lane: {reason}"
+                f"Configured single-day lane: {reason}"
                 for reason in temporary_reasons
                 if reason not in regular_reasons
             )
@@ -3005,13 +3012,14 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             ),
             "late_night": (
                 f"{GENERAL_API_URL}/recruit/search "
-                "(강남구·서초구·송파구, short-term through the availability "
-                "deadline, any weekday; detail-verified 19:00-02:00; final "
-                "20-minute station-area screening)"
+                f"({'·'.join(SETTINGS.albamon.evening.districts)}, short-term "
+                "through the availability deadline, any weekday; detail-verified "
+                f"{LATE_NIGHT_AVAILABILITY}; final "
+                f"{EVENING_STATION_AREA_LIMIT_MINUTES}-minute station-area screening)"
             ),
             "station_safety": (
                 f"{GENERAL_API_URL}/recruit/search "
-                "(exact 역삼·강남·송파·잠실·잠실새내·삼성 station tags; "
+                f"(exact {'·'.join(SETTINGS.albamon.evening.stations)} tags; "
                 "list-level availability prefilter and coordinate verification)"
             ),
             "remote": REMOTE_URL,
@@ -3023,7 +3031,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "saved_condition": saved,
         "target_districts": list(TARGET_DISTRICTS),
         "collection_areas": ["서울 전체"],
-        "late_night_collection_area": "강남구·서초구·송파구 전체",
+        "late_night_collection_area": "·".join(
+            f"{district} 전체" for district in SETTINGS.albamon.evening.districts
+        ),
         "late_night_station_corridor": list(EVENING_CORRIDOR_STATIONS),
         "late_night_station_area_limit_minutes": EVENING_STATION_AREA_LIMIT_MINUTES,
         "late_night_availability": LATE_NIGHT_AVAILABILITY,
@@ -3042,8 +3052,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             ),
             "requires_independent_one_day_option": True,
         },
-        "requested_age": 26,
-        "requested_gender": "male or unrestricted",
+        "requested_age": SETTINGS.albamon.requested_age,
+        "requested_gender": SETTINGS.albamon.requested_gender,
         "work_term_cutoff_date": as_of_date.isoformat(),
         "end_time_threshold": args.end_before,
         "utility_model": UTILITY_MODEL,

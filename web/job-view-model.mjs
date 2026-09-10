@@ -43,7 +43,9 @@ export function buildJobViewModels(jobs) {
         ...(job.weekend_shift_options || []),
         ...(job.late_night_shift_options || []),
       ].map(cleanText).join(" ").toLocaleLowerCase("ko"),
-      pay: numeric(job.comparable_hourly_pay, 0),
+      pay: job.pay_comparison_reliable === false
+        ? 0
+        : numeric(job.work_hourly_pay ?? job.comparable_hourly_pay, 0),
       commute: numeric(job.transit_minutes, FAR_FUTURE),
       rank: numeric(job.utility_rank, FAR_FUTURE),
       zoneRank: ZONE_SORT_ORDER[job.search_zone] ?? FAR_FUTURE,

@@ -12,6 +12,7 @@ from tools.albamon_application_messages import (
     classify_role,
     comparable_hourly_pay,
     commute_policy_for_job,
+    door_to_door_hourly_pay,
     fallback_regular_spec,
     load_transit_cache,
     load_message_cache,
@@ -25,6 +26,40 @@ from tools.albamon_application_messages import (
 REPORT_PATH = Path(
     "artifacts/albamon/2026-08-01-combined-reranked-no-endtime-preference.json"
 )
+TEST_PROFILE_FACTS = {
+    "english": {
+        "fact": "synthetic English-language example (영어 테스트)",
+        "source": "synthetic test fixture",
+    },
+    "hall_service": {
+        "fact": "synthetic profile fact: hall_service",
+        "source": "synthetic test fixture",
+    },
+    "health_certificate": {
+        "fact": "synthetic required-document example (보건증 테스트)",
+        "source": "synthetic test fixture",
+    },
+    "restaurant": {
+        "fact": "synthetic profile fact: restaurant",
+        "source": "synthetic test fixture",
+    },
+    "work_style": {
+        "fact": "synthetic profile fact: work_style",
+        "source": "synthetic test fixture",
+    },
+}
+_ORIGINAL_PROFILE_FACTS: dict[str, dict[str, str]] = {}
+
+
+def setUpModule() -> None:
+    _ORIGINAL_PROFILE_FACTS.update(PROFILE_FACTS)
+    PROFILE_FACTS.clear()
+    PROFILE_FACTS.update(TEST_PROFILE_FACTS)
+
+
+def tearDownModule() -> None:
+    PROFILE_FACTS.clear()
+    PROFILE_FACTS.update(_ORIGINAL_PROFILE_FACTS)
 
 
 class TransitCacheOriginTests(unittest.TestCase):
@@ -105,13 +140,13 @@ class CommutePolicyTests(unittest.TestCase):
         self.assertEqual(20, metadata["commute_priority_score"])
         self.assertIn("통근 없음", " ".join(reasons))
 
-    def test_bangbae_address_is_classified_as_the_seocho_corridor(self):
+    def test_bangbae_address_uses_the_configured_seocho_corridor(self):
         zone, label = classify_search_zone(
             {"working_address": "서울 서초구 방배동 123-4"}
         )
 
         self.assertEqual("seocho_corridor", zone)
-        self.assertIn("방배", label)
+        self.assertIn("서초구", label)
 
     def test_standard_zones_use_an_inclusive_fifty_minute_limit(self):
         for minutes, excluded in ((49, False), (50, False), (51, True)):
@@ -464,8 +499,8 @@ class AlbamonApplicationMessageTests(unittest.TestCase):
         )
         for recruit_no in health_jobs:
             record = by_id[recruit_no]
-            self.assertIn("보건증을 보유", record["message"])
-            self.assertIn("[REMOVED_PRIVATE_PROFILE_5d2d7223f1]", record["profile_facts_used"])
+            self.assertIn(TEST_PROFILE_FACTS["health_certificate"]["fact"], record["message"])
+            self.assertIn(TEST_PROFILE_FACTS["health_certificate"]["fact"], record["profile_facts_used"])
             self.assertFalse("보건증" in record["fit_warning"])
             self.assertTrue(any("제출 필요 시점" in note for note in record["verify_before_sending"]))
 
@@ -475,7 +510,7 @@ class AlbamonApplicationMessageTests(unittest.TestCase):
                 by_id[recruit_no]["send_readiness"],
             )
         self.assertEqual(
-            "conditional_on_requirement", by_id[118204044]["send_readiness"]
+            "ready_after_schedule_check", by_id[118204044]["send_readiness"]
         )
 
         for recruit_no in (118132532, 118199485):
@@ -506,8 +541,8 @@ class AlbamonApplicationMessageTests(unittest.TestCase):
             record for record in self.records if record["recruit_no"] == 118157941
         )
 
-        self.assertIn("중국어는 공고의 요구 수준으로 구사하지 못합니다", maison["message"])
-        self.assertIn("우선순위가 매우 낮습니다", maison["fit_warning"])
+        self.assertNotIn("중국어", maison["message"])
+        self.assertIn("중국어 능력이 설정된 지원자 프로필에서 확인되지 않음", maison["fit_warning"])
 
     def test_future_job_gets_safe_rule_based_fallback(self):
         future = {
@@ -539,8 +574,9 @@ class AlbamonApplicationMessageTests(unittest.TestCase):
         [record] = build_records(future)
 
         self.assertEqual("relevance_grounded", record["message_origin"])
-        self.assertIn("음식점과 [REMOVED_PRIVATE_PROFILE_7f43392d5e]", record["message"])
-        self.assertIn("보건증도 보유", record["message"])
+        self.assertIn(TEST_PROFILE_FACTS["restaurant"]["fact"], record["message"])
+        self.assertIn(TEST_PROFILE_FACTS["hall_service"]["fact"], record["message"])
+        self.assertIn(TEST_PROFILE_FACTS["health_certificate"]["fact"], record["message"])
         self.assertEqual("ready_after_schedule_check", record["send_readiness"])
 
     def test_cleaning_message_excludes_unrelated_technical_and_language_facts(self):
@@ -796,7 +832,7 @@ class AlbamonApplicationMessageTests(unittest.TestCase):
         [record] = build_records({"jobs": [job], "logistics_jobs": []})
 
         self.assertEqual("maybe_later", record["application_disposition"])
-        self.assertIn("자격증 보유 사실이 확인되지 않음", record["disposition_reason"])
+        self.assertIn("자격이 설정된 지원자 프로필에서 확인되지 않음", record["disposition_reason"])
 
     def test_cafe_experience_only_posting_is_automatically_deferred(self):
         job = {
@@ -822,7 +858,7 @@ class AlbamonApplicationMessageTests(unittest.TestCase):
         [record] = build_records({"jobs": [job], "logistics_jobs": []})
 
         self.assertEqual("maybe_later", record["application_disposition"])
-        self.assertIn("카페 실무 경력이 없음", record["disposition_reason"])
+        self.assertIn("카페 경력이 설정된 지원자 프로필에서 확인되지 않음", record["disposition_reason"])
 
     def test_distance_excluded_job_gets_own_heading_without_application_copy(self):
         job = {
@@ -976,6 +1012,149 @@ class AlbamonApplicationMessageTests(unittest.TestCase):
         )
         self.assertEqual(14_286, result["hourly_equivalent"])
         self.assertIn("7시간", result["basis"])
+        self.assertTrue(result["reliable"])
+        self.assertEqual(100_000, result["shift_earnings_won"])
+
+    def test_daily_pay_without_shift_hours_is_not_assigned_an_eight_hour_guess(self):
+        result = comparable_hourly_pay(
+            {
+                "recruit_no": 999999993,
+                "salary_type": "일급",
+                "salary": "150,000원",
+                "title": "행사 운영 스태프",
+                "work_time": "시간협의",
+            }
+        )
+
+        self.assertEqual(0, result["hourly_equivalent"])
+        self.assertFalse(result["reliable"])
+        self.assertIsNone(result["paid_shift_hours"])
+        self.assertEqual(150_000, result["shift_earnings_won"])
+        self.assertIn("Pareto", result["caution"])
+
+    def test_daily_pay_uses_a_detail_verified_selectable_shift(self):
+        record = {
+            "recruit_no": 999999996,
+            "salary_type": "일급",
+            "salary": "150,000원",
+            "title": "행사 안내원",
+            "work_time": "시간협의",
+            "weekend_shift_options": ["일 12:30~18:00"],
+            "transit_minutes": 15,
+        }
+
+        pay = comparable_hourly_pay(record)
+        total_time = door_to_door_hourly_pay(record, pay)
+
+        self.assertTrue(pay["reliable"])
+        self.assertEqual(27_273, pay["hourly_equivalent"])
+        self.assertEqual(5.5, pay["paid_shift_hours"])
+        self.assertIn("선택 가능 근무조", pay["basis"])
+        self.assertEqual(25_000, total_time["hourly_equivalent"])
+
+    def test_team_total_override_is_never_treated_as_individual_daily_pay(self):
+        result = comparable_hourly_pay(
+            {
+                "recruit_no": 999999997,
+                "company": "이음",
+                "title": "[주말 부업] 포토부스 행사 매니저 & 스탭 모집",
+                "salary_type": "일급",
+                "salary": "150,000원",
+                "work_time": "10:00~20:00",
+            }
+        )
+
+        self.assertFalse(result["reliable"])
+        self.assertEqual(0, result["hourly_equivalent"])
+        self.assertIsNone(result["shift_earnings_won"])
+        self.assertIn("팀당 총액", result["basis"])
+
+    def test_door_to_door_rate_uses_fixed_earnings_span_and_round_trip(self):
+        record = {
+            "recruit_no": 999999994,
+            "salary_type": "일급",
+            "salary": "150,000원",
+            "title": "행사 운영 스태프",
+            "work_time": "10:00~22:00",
+            "work_time_option": "휴게시간 240분",
+            "transit_minutes": 51,
+        }
+
+        pay = comparable_hourly_pay(record)
+        total_time = door_to_door_hourly_pay(record, pay)
+
+        self.assertEqual(18_750, pay["hourly_equivalent"])
+        self.assertEqual(8, pay["paid_shift_hours"])
+        self.assertEqual(12, pay["shift_span_hours"])
+        self.assertEqual(822, total_time["total_minutes"])
+        self.assertEqual(10_949, total_time["hourly_equivalent"])
+
+    def test_door_to_door_rate_requires_exact_shift_span(self):
+        record = {
+            "recruit_no": 999999995,
+            "salary_type": "일급",
+            "salary": "150,000원",
+            "work_time": "시간협의",
+            "transit_minutes": 20,
+        }
+        total_time = door_to_door_hourly_pay(
+            record, comparable_hourly_pay(record)
+        )
+
+        self.assertIsNone(total_time["hourly_equivalent"])
+        self.assertIn("근무시간", total_time["basis"])
+
+    def test_hourly_rate_does_not_invent_shift_earnings_without_paid_duration(self):
+        record = {
+            "recruit_no": 999999998,
+            "salary_type": "시급",
+            "salary": "15,000원",
+            "work_time": "10:00~18:00",
+            "work_time_option": "",
+            "transit_minutes": 20,
+        }
+
+        pay = comparable_hourly_pay(record)
+        total_time = door_to_door_hourly_pay(record, pay)
+
+        self.assertTrue(pay["reliable"])
+        self.assertEqual(15_000, pay["hourly_equivalent"])
+        self.assertIsNone(pay["shift_earnings_won"])
+        self.assertIsNone(total_time["hourly_equivalent"])
+        self.assertIn("총수입", total_time["basis"])
+
+    def test_reranking_places_unverified_pay_after_reliable_pay(self):
+        base = {
+            "work_time_option": "",
+            "title": "주말 알바",
+            "work_days": "주말(토, 일)",
+            "weekend_compatibility_basis": "weekend (Sat, Sun) detail field",
+            "duration_review_status": "verified_shorter",
+            "hard_requirements": [],
+            "application_methods": ["online"],
+            "transit_minutes": 10,
+        }
+        records = [
+            {
+                **base,
+                "recruit_no": 1,
+                "salary_type": "일급",
+                "salary": "150,000원",
+                "work_time": "시간협의",
+            },
+            {
+                **base,
+                "recruit_no": 2,
+                "salary_type": "시급",
+                "salary": "12,000원",
+                "work_time": "10:00~18:00",
+            },
+        ]
+
+        rerank_records(records)
+
+        self.assertEqual([2, 1], [record["recruit_no"] for record in records])
+        self.assertFalse(records[1]["pay_comparison_reliable"])
 
     def test_misleading_headline_pay_uses_detail_review_override(self):
         popup = comparable_hourly_pay(

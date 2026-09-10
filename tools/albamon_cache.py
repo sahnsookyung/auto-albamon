@@ -12,17 +12,19 @@ from typing import Any
 
 try:
     from tools.albamon_runtime import atomic_write_text
+    from tools.jobscout_config import SETTINGS
 except ModuleNotFoundError:  # Support direct execution from the repository root.
     from albamon_runtime import atomic_write_text
+    from jobscout_config import SETTINGS
 
 
 CACHE_VERSION = 1
 DEFAULT_DETAIL_CACHE_PATH = Path("artifacts/albamon/cache/details.json")
-DEFAULT_EXCLUDED_TTL_DAYS = 7
-DEFAULT_RETENTION_DAYS = 7
-DEFAULT_CLOSING_REFRESH_HOURS = 4
-DEFAULT_ELIGIBLE_REFRESH_HOURS = 12
-DEFAULT_APPLIED_REFRESH_HOURS = 24
+DEFAULT_EXCLUDED_TTL_DAYS = SETTINGS.cache.excluded_ttl_days
+DEFAULT_RETENTION_DAYS = SETTINGS.cache.retention_days
+DEFAULT_CLOSING_REFRESH_HOURS = SETTINGS.cache.closing_refresh_hours
+DEFAULT_ELIGIBLE_REFRESH_HOURS = SETTINGS.cache.eligible_refresh_hours
+DEFAULT_APPLIED_REFRESH_HOURS = SETTINGS.cache.applied_refresh_hours
 CLOSING_SOON_WINDOW_HOURS = 72
 
 FINGERPRINT_FIELDS = (

@@ -20,6 +20,10 @@ class OperationCancelled(RuntimeError):
     """Raised by a task at a safe cancellation checkpoint."""
 
 
+class OperationCapacityError(RuntimeError):
+    """Raised when the bounded registry has no room for another operation."""
+
+
 ProgressCallback = Callable[[int, str, dict[str, Any] | None], None]
 OperationTask = Callable[[ProgressCallback], dict[str, Any]]
 
@@ -66,6 +70,10 @@ class OperationRegistry:
                 if operation.key == key and operation.status in {"queued", "running"}:
                     return self._public(operation)
             self._prune_locked()
+            if len(self._operations) >= self._max_history:
+                raise OperationCapacityError(
+                    "Too many dashboard operations are already queued or running"
+                )
             operation = _Operation(
                 operation_id=secrets.token_hex(10),
                 kind=str(kind),

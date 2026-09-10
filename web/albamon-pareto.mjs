@@ -1,20 +1,33 @@
-export function albamonPointForJob(job) {
+export const ALBAMON_PAY_METRICS = Object.freeze({
+  hourly: "comparable_hourly_pay",
+  shift_total: "estimated_shift_earnings_won",
+});
+
+function payForJob(job, metric) {
+  const field = ALBAMON_PAY_METRICS[metric];
+  if (!field) throw new Error(`Unsupported Albamon pay metric: ${metric}`);
+  return numericValue(job?.[field]);
+}
+
+export function albamonPointForJob(job, metric = "hourly") {
   const lanes = new Set(job?.eligibility_lanes || []);
   const remote = job?.remote_job === true || lanes.has("remote_short_term");
   return {
     job: job || {},
     mode: remote ? "remote" : "onsite",
     commute: remote ? 0 : numericValue(job?.transit_minutes),
-    pay: numericValue(job?.comparable_hourly_pay),
-    frontier: job?.pareto_frontier === true,
+    pay: payForJob(job, metric),
+    payMetric: metric,
+    frontier: false,
   };
 }
 
-export function albamonParetoPoints(jobs) {
+export function albamonParetoPoints(jobs, metric = "hourly") {
   const points = [];
   for (const job of jobs || []) {
     if (job?.application_disposition !== "apply") continue;
-    const point = albamonPointForJob(job);
+    if (job?.pay_comparison_reliable === false) continue;
+    const point = albamonPointForJob(job, metric);
     if (!Number.isFinite(point.pay) || point.pay <= 0) continue;
     const { commute } = point;
     const remote = point.mode === "remote";
@@ -22,6 +35,15 @@ export function albamonParetoPoints(jobs) {
       continue;
     }
     points.push(point);
+  }
+  for (const point of points) {
+    point.frontier = !points.some((other) =>
+      other !== point &&
+      other.mode === point.mode &&
+      other.pay >= point.pay &&
+      other.commute <= point.commute &&
+      (other.pay > point.pay || other.commute < point.commute)
+    );
   }
   return points.sort((left, right) =>
     left.mode.localeCompare(right.mode) ||
@@ -66,6 +88,7 @@ export function albamonPointSummary(point) {
     title: compactText(job.title) || "Untitled job",
     area: compactText(job.target_district || job.area) || "Area unknown",
     pay: Number(point?.pay) || 0,
+    payMetric: point?.payMetric === "shift_total" ? "shift_total" : "hourly",
     commuteLabel: point?.mode === "remote"
       ? "Remote"
       : Number.isFinite(point?.commute) ? `${point.commute} min` : "Unverified",

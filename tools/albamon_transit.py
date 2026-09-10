@@ -35,9 +35,11 @@ except ImportError:  # pragma: no cover - Windows fallback for local development
 try:
     from tools.albamon_jobs import fetch_job_detail
     from tools.albamon_runtime import atomic_write_text
+    from tools.jobscout_config import SETTINGS
 except ModuleNotFoundError:
     from albamon_jobs import fetch_job_detail
     from albamon_runtime import atomic_write_text
+    from jobscout_config import SETTINGS
 
 
 KAKAO_TRANSIT_URL = "https://dapi.kakao.com/v2/routing/publictraffic"
@@ -48,10 +50,10 @@ DEFAULT_LATE_NIGHT_OUTPUT = Path("tools/albamon_late_night_route_cache.json")
 DEFAULT_WORKERS = 6
 ORIGIN_STATE_PATH = Path(__file__).with_name("commute_origin.json")
 DEFAULT_ORIGIN = {
-    "name": "잠실새내역",
-    "address": "서울특별시 송파구 올림픽로 140",
-    "latitude": 37.51157,
-    "longitude": 127.08625,
+    "name": SETTINGS.commute.default_origin_name,
+    "address": SETTINGS.commute.default_origin_address,
+    "latitude": SETTINGS.commute.default_origin_latitude,
+    "longitude": SETTINGS.commute.default_origin_longitude,
 }
 
 
@@ -121,13 +123,13 @@ def origin_map_links(origin: dict[str, Any] | None = None) -> dict[str, str]:
         ),
         "naver": f"https://map.naver.com/p/search/{address}",
     }
-MAX_TRANSIT_MINUTES = 50
-DEFAULT_ROUTE_CACHE_HOURS = 24
-DEFAULT_ROUTE_REFRESH_HOUR = 10
+MAX_TRANSIT_MINUTES = SETTINGS.commute.base_limit_minutes
+DEFAULT_ROUTE_CACHE_HOURS = SETTINGS.commute.route_cache_hours
+DEFAULT_ROUTE_REFRESH_HOUR = SETTINGS.commute.route_refresh_hour
 KAKAO_PUBLIC_TRANSIT_FREE_DAILY_QUOTA = 1_000
-DEFAULT_KAKAO_PUBLIC_TRANSIT_DAILY_LIMIT = 900
-DEFAULT_KAKAO_REQUESTS_PER_SECOND = 4.0
-KAKAO_RATE_LIMIT_COOLDOWN_SECONDS = 5.0
+DEFAULT_KAKAO_PUBLIC_TRANSIT_DAILY_LIMIT = SETTINGS.kakao.daily_limit
+DEFAULT_KAKAO_REQUESTS_PER_SECOND = SETTINGS.kakao.requests_per_second
+KAKAO_RATE_LIMIT_COOLDOWN_SECONDS = SETTINGS.kakao.rate_limit_cooldown_seconds
 DEFAULT_KAKAO_QUOTA_STATE = Path(
     "artifacts/albamon/cache/kakao_public_transit_quota.json"
 )

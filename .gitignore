@@ -1,5 +1,13 @@
 .DS_Store
-.env
+.env*
+!.env.example
+*.pem
+*.p12
+*.pfx
+*.key
+credentials*.json
+service-account*.json
+secrets/
 .venv/
 __pycache__/
 *.py[cod]
@@ -16,3 +24,4 @@ tools/albamon_applied_jobs.json
 tools/albamon_application_dispositions.json
 tools/albamon_review_resolutions.json
 tools/commute_origin.json
+config/*.local.toml

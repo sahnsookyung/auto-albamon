@@ -16,6 +16,55 @@ Generated reports, API caches, authenticated application history, and personal
 application dispositions remain in the local working tree but are ignored by
 Git to avoid committing bulky or private runtime data.
 
+## Configuration and secrets
+
+Public, documented defaults live in [`config/jobscout.toml`](config/jobscout.toml).
+Every supported source, duration bucket, date window, pay threshold, commute
+rule, cache lifetime, and dashboard limit is listed there with its allowed
+values. Its saved-search ID and date windows deliberately fail closed, so a
+fresh public clone cannot start somebody else's search accidentally. Do not edit
+Python constants to change search preferences.
+
+For personal settings, copy the override templates and edit the ignored copies:
+
+```bash
+cp config/jobscout.local.example.toml config/jobscout.local.toml
+cp config/applicant_profile.example.toml config/applicant_profile.local.toml
+cp .env.example .env
+```
+
+Set the Albamon saved-search ID, personal commute defaults, search windows, and
+optional verified résumé facts only in those ignored files. A different TOML
+override can be selected with `JOBSCOUT_CONFIG=/absolute/path/settings.toml`.
+Nested override tables are merged with the public defaults; unknown keys,
+invalid enum values, malformed ranges, and secret-like configuration fail
+before network activity. Existing CLI options remain one-run overrides.
+
+Common changes all belong in the ignored override:
+
+- Change Albamon scope with `enabled_sources`, `work_periods`,
+  `target_districts`, and `availability_end_date` under `[albamon]`.
+- Change evening eligibility with the hours, districts, stations, and walking
+  model under `[albamon.evening]`.
+- Change origin limits and optional long-commute pay extensions under
+  `[commute]`; the dashboard-confirmed origin remains in its ignored JSON file.
+- Change agency dates, weekend-only behavior, providers, and the actual/base
+  pay floor under `[weekend_agencies]`.
+- Change result weighting without changing eligibility under `[ranking]`.
+- Change quotas, cache lifetimes, and exploration bounds under `[kakao]`,
+  `[cache]`, and `[dashboard]`.
+
+Credentials are intentionally excluded from TOML and JSON. Put only
+`KAKAO_REST_API_KEY`, `DISCORD_WEBHOOK_URL`, and
+`DISCORD_WEBHOOK_URL_HOTELIER` in `.env` or same-named process variables.
+`.env*` is ignored except for the empty `.env.example`; application artifacts,
+the selected commute origin, and the applicant profile are ignored as well.
+Before making the repository public, scan both the current tree and Git history
+with a credential scanner such as `gitleaks dir . --redact` and
+`gitleaks git . --redact`. The scanner will still see an ignored local `.env`
+in a whole-directory scan; never stage that file, and inspect only redacted
+output.
+
 For a fresh clone, copy the two `*.example.json` files in `tools/` to their
 matching non-example names before recording application history or personal
 defer/do-not-apply choices. Missing application history is treated as an empty,
@@ -27,10 +76,10 @@ fixture and is skipped when that fixture is not present.
 
 WithYou, Huplux, Eumplus, 어울림, and 루틴 are collected by an isolated adapter
 package; they do not enter Albamon's combined report, application
-dispositions, or Discord notification state. The temporary search covers only
-August 29–30 and September 5–6, 2026, and keeps only open shifts whose
-advertised base wage or reliable non-주휴 hourly equivalent is at least KRW
-12,000.
+dispositions, or Discord notification state. The monitored date range,
+weekend-only switch, enabled providers, and minimum actual/base wage are set in
+`[weekend_agencies]`. A 주휴-inclusive headline never rescues an offer below the
+configured base-pay floor.
 
 The JSON and Markdown reports also carry a seven-agency reference catalog for
 데이에이전시, 후플럭스 (HUPLUX), 이음플러스, 위드유, 호텔서비스
@@ -44,7 +93,7 @@ below the actual/base pay threshold and its public source uses unencrypted HTTP.
 
 ```bash
 python3 tools/weekend_agency_refresh.py \
-  --env-file /Users/sookyungahn/repos/auto-albamon/.env \
+  --env-file .env \
   --notify
 ```
 
@@ -64,12 +113,11 @@ open/closed state is preserved; its login-gated detail page is never polled.
 every exact shift while separating base and 주휴-inclusive pay.
 Raw rows, page-boundary duplicates, unique listing IDs, open IDs, and target-date
 offers are reported separately so an empty target window is observable. A transient source
-failure may reuse only a visibly marked snapshot from the prior eight hours;
+failure may reuse only a visibly marked snapshot within the configured cache lifetime;
 otherwise the previous complete report is preserved. Successful source
 snapshots are still checkpointed when another source fails, including valid
 empty results. Venue routes share Albamon's Kakao free-tier ledger and request
-pacer. The workflow exits without fetching after September 6, and its branch of
-the four-hour heartbeat is also disabled after that date.
+pacer. The workflow exits without fetching after the configured search end.
 
 Hotel-agency Discord delivery is also isolated from Albamon. It reads only
 `DISCORD_WEBHOOK_URL_HOTELIER` from the selected workspace `.env` (or the same
@@ -87,11 +135,10 @@ Actual/base pay and the conditional 주휴-inclusive value remain separate in
 every message. The webhook value is validated, never logged, and never written
 to an artifact.
 
-Run the complete workflow with one command. The REST key may be exported or
-stored as `KAKAO_REST_API_KEY` in the workspace `.env`:
+After placing the REST key in the ignored workspace `.env`, run the complete
+workflow without putting the credential in the command line or shell history:
 
 ```bash
-export KAKAO_REST_API_KEY="your Kakao REST API key"
 python3 tools/albamon_refresh.py
 ```
 
@@ -100,7 +147,7 @@ transaction:
 
 ```bash
 python3 tools/albamon_refresh.py --notify \
-  --webhook-env-file /Users/sookyungahn/repos/auto-albamon/.env
+  --webhook-env-file .env
 ```
 
 Only one refresh process and one Discord state writer may run at a time.
@@ -112,12 +159,13 @@ IDs, counts, and ended-term exclusions are validated before Discord delivery.
 This produces `latest-combined.*`, refreshes/reuses public-transit routes, and
 writes `latest-unified-report.*`. Kakao public-transit calls are guarded by an
 atomic Korea-date ledger at
-`artifacts/albamon/cache/kakao_public_transit_quota.json`. The default ceiling
-is 900 calls/day—100 below Kakao's published 1,000/day free quota. Cache hits do
-not consume the budget. Kakao request starts are shared across all workers and
-paced at four calls per second. Because Kakao error `-10` can mean either a
+`artifacts/albamon/cache/kakao_public_transit_quota.json`. The public default
+ceiling and pacing are documented under `[kakao]`; the shipped values retain a
+100-call margin below Kakao's published 1,000/day free quota. Cache hits do not
+consume the budget. Kakao request starts are shared across all workers and use
+the configured global pace. Because Kakao error `-10` can mean either a
 per-second limit or quota exhaustion, the first occurrence applies one shared
-five-second cooldown and one paced retry; a repeated `-10`, local ceiling,
+configured cooldown and one paced retry; a repeated `-10`, local ceiling,
 Kakao HTTP 429, or API access error stops further calls and marks affected
 worksites for a Kakao Maps WebUI fallback. Use `--combined-only` only when
 route/report generation is not needed.
@@ -137,10 +185,10 @@ python3 tools/albamon_dashboard.py
 ```
 
 The Hotel agencies tab can run a separate, non-notifying exploration for any
-future date range up to 31 days. The selected range is saved in browser local
+future date range up to the configured exploration limit. The selected range is saved in browser local
 storage, writes immutable results only to `artifacts/weekend-agencies/explore/`,
-and never changes the four fixed Discord monitoring dates. A normal search
-reuses an identical result for up to four hours; `Refresh sources` explicitly
+and never changes the monitored Discord date window. A normal search
+reuses an identical result for the configured exploration-cache duration; `Refresh sources` explicitly
 bypasses that cache. Network searches and origin recalculations run as bounded
 background operations with visible progress and cooperative cancellation, so
 the local HTTP server remains responsive. Rows whose work date is before the
@@ -159,7 +207,8 @@ cached, empty, disabled, and login-gated feeds. Report downloads appear once in
 the shared header.
 
 The dashboard shows the active commute origin above both data views. A fresh
-clone starts from the non-personal public landmark `잠실새내역`; a user's chosen
+clone starts from the non-personal public landmark configured in
+`config/jobscout.toml`; a user's chosen
 origin remains only in the ignored `tools/commute_origin.json`. An address can
 be resolved with the shared Kakao free-tier ledger, or a coordinate can be
 selected directly from either map without an API call. A confirmed change first
@@ -183,9 +232,8 @@ evening lane. The trade-off view exposes the pay/commute Pareto frontier: it
 keeps actionable jobs for which no comparable job pays at least as much with
 an equal-or-shorter verified commute. Remote and on-site jobs use separate
 frontiers so remote work does not hide useful physical worksites. The zone sort
-puts remote first, then 강남/송파 and the 서초 corridor,
-the 강동/성동/광진 near-core zone, the premium 용산/영등포 stretch, and the rest
-of Seoul. Selecting a row or map marker opens the full decision context,
+puts remote first, then nearby corridors, the configured premium-commute
+districts, and the rest of Seoul. Selecting a row or map marker opens the full decision context,
 verified route, tailored application message, and the pre-send checklist.
 Markdown, CSV, and JSON reports remain downloadable from the header.
 
@@ -281,9 +329,10 @@ physical attributes, language requirements, or cold-storage capability are
 never stated as fact. An optional sentence is supplied for those cases and must
 only be added after the applicant confirms every claim in it. The profile-fact
 set intentionally excludes contact details, exact address, birth date, and
-resume identifiers. Current jobs have hand-tailored copy; new job IDs receive a
-clearly marked rule-based first draft so a daily run still completes, with a
-mandatory detailed-posting review note.
+resume identifiers. Every job receives a role-aware, evidence-grounded draft
+so a daily run still completes, with a mandatory detailed-posting review note.
+Job-specific pay corrections are limited to reviewed public-posting evidence
+and never contain applicant data.
 
 Persistent per-job choices live in
 `tools/albamon_application_dispositions.json`. A `maybe_later` or
@@ -294,10 +343,10 @@ history, the applied status takes precedence.
 ## Daily combined report
 
 `tools/albamon_combined_jobs.py` is the repeatable workflow for one deduplicated
-report covering 맞춤알바, a one-day multi-slot safety-net query, a Songpa
-late-night query, an exact six-station safety net, 재택알바, 여름알바, and
-급구알바. It reads the live saved condition
-(`suitNo` `35138482`), applies those
+report covering 맞춤알바, a one-day multi-slot safety-net query, a configured
+evening query, an exact configured-station safety net, 재택알바, 여름알바, and
+급구알바. It reads the live saved condition selected by
+`albamon.saved_search_id`, applies those
 same filters to the special-list APIs, then verifies the detail content rather
 than trusting only Albamon's broad tags. The safety-net query removes Albamon's
 server-side weekday constraint only for one-day jobs; this catches postings that
@@ -309,23 +358,21 @@ require both days. Required weekday attendance, weekday training, and bundled
 multi-day schedules still fail closed unless the posting exposes an independent
 weekend option.
 
-The station-corridor evening query removes weekday constraints, searches
-Gangnam, Seocho, and Songpa, and limits collection to Albamon's one-day,
-under-one-week, and one-week-to-one-month buckets. Detail screening rejects
-commitments that cannot finish by September 9, 2026 and admits only verified
-shifts wholly contained in the 19:00–02:00 availability window. The unified
-report then requires the worksite to fall within a conservative 20-minute
-walking-radius estimate of 역삼·강남·송파·잠실·잠실새내·삼성 station. It uses
-straight-line distance with a 1.2 pedestrian-route factor and separately applies
-the normal verified home-to-work commute rule.
-A second bounded station-tab query uses Albamon's exact 역삼·강남·송파·잠실·
-잠실새내·삼성 station codes. Before opening details, it retains only rows with
-a list-level weekend, 19:00–02:00, or independently selectable-day signal; the
-detail worksite must still pass the same conservative 20-minute station check.
+The station-corridor evening query removes weekday constraints and uses the
+districts, work-period buckets, deadline, hours, stations, and walking model in
+`[albamon]` and `[albamon.evening]`. Detail screening admits only work that fits
+those settings. The default station catalog
+covers 역삼·강남·송파·잠실·잠실새내·삼성; the configurable walking model is
+applied separately from the verified origin-to-work commute rule.
+A second bounded station-tab query uses the configured Albamon station codes.
+Before opening details, it retains only rows with a list-level weekend,
+configured evening-window, or independently selectable-day signal; the detail
+worksite must still pass the configured station check.
 
 The remote lane ignores the posting's nominal city because no commute is
 required, but is deliberately stricter elsewhere: only stated hourly wages at
-or above KRW 10,320, short commitments, a weekend/evening/fully flexible
+or above `albamon.remote_minimum_hourly_won`, short commitments, a
+weekend/evening/fully flexible
 schedule, readable details, and currently applicable posts can pass. Signup,
 fees, account sharing, promotional work, surveys, review/comment work, and
 personal photo/video collection signals are rejected. Remote rows receive a
@@ -341,35 +388,30 @@ smaller displayed walking/riding duration. Return checks depart at the exact
 advertised end time. The representative service date is stored with both legs
 and must be checked again for the eventual work date.
 
-The collection currently encodes:
+The shipped configuration currently specifies:
 
 - Area: all 25 Seoul districts (the saved-search area selection is overridden at
   API collection time)
-- Period buckets: one day, one week or less, and one week to one month. The
-  one-to-three-month bucket is intentionally omitted because required work must
-  finish by September 9, 2026.
+- Period buckets, availability deadline, and enabled collection lanes come from
+  `[albamon]`. The public defaults omit the one-to-three-month bucket.
 - Weekend (Saturday or Sunday), including negotiated schedules with a verified
   weekend option
-- Male age 26, including unrestricted listings
-- Education unrestricted
+- Neutral demographic metadata by default; personal overrides may narrow it
+- Education requirements are recorded from each posting rather than inferred
 
 Run it with:
 
 ```bash
 python3 tools/albamon_combined_jobs.py \
-  --suit-no 35138482 \
   --output-prefix artifacts/albamon/latest-combined
 ```
 
 The default refresh is incremental and checkpoints to
 `artifacts/albamon/cache/details.json`. New jobs and jobs whose list-level
-fingerprint changed always receive a full detail fetch. Unchanged postings that
-close within 72 hours are rechecked every four hours, other eligible postings
-every 12 hours, and already-applied postings every 24 hours. Unchanged jobs
-that were previously excluded reuse their full cached detail for seven days,
-then are refreshed on a rolling basis. Inactive excluded and authoritatively
-closed entries are removed immediately, while other unseen cache records are
-retained for at most seven days. A missing ID never survives into the live
+fingerprint changed always receive a full detail fetch. Unchanged posting
+refresh intervals, excluded-entry TTL, and retention are controlled by
+`[cache]`. Inactive excluded and authoritatively closed entries are removed
+immediately. A missing ID never survives into the live
 report merely because it remains in the cache. Semantic deduplication includes
 material schedule and guaranteed-pay fields, so operationally different shifts
 or pay offers are not collapsed. Use `--no-detail-cache` for
@@ -445,9 +487,9 @@ python3 tools/albamon_combined_jobs.py \
 The combined report excludes work terms ending before the run date. A same-day
 job stays available until its last exact advertised shift starts; when no exact
 start is available it is retained until the next date rather than disappearing
-prematurely. It also excludes
-fixed terms extending past September 9, 2026, minimum commitments that no longer
-fit between the run date and that deadline, driver/licence roles, demographic mismatches, out-of-area
+prematurely. It also excludes fixed terms extending past the configured
+availability end, minimum commitments that no longer fit between the run date
+and that deadline, driver/licence roles, demographic mismatches, out-of-area
 branches, and negotiated ads that do not actually document a Saturday or Sunday
 option.
 An employer-written hard request for long-term availability with no numeric
@@ -491,22 +533,20 @@ shift and Kakao's reverse-direction bicycle road-priority route as fallback.
 When a Naver future result exists, the unified distance filter uses its full
 departure-to-arrival elapsed time, including scheduled wait. If an exact shift
 has not yet received a Naver pass, the Kakao route pattern remains visibly
-provisional. The unified report uses a 50-minute inclusive standard
-cutoff. In 용산구 and 영등포구 only,
-reliable comparable pay extends the inclusive limit from KRW 12,000 at 50
-minutes to KRW 15,000 at 80 minutes (KRW 100 per added minute), then to KRW
-18,000 at the hard 90-minute cap (KRW 300 per added minute). Unknown routes
-remain excluded.
+provisional. The unified report uses `[commute].base_limit_minutes` as its
+inclusive standard cutoff. Optional pay-dependent extensions—including their
+districts, thresholds, slopes, and hard cap—are defined under
+`[commute.premium_extension]`. Unknown routes remain excluded.
 Listings whose actual worksite cannot be verified (notably pickup-only Coupang
 campaigns) are conservatively placed in `거리 제외` as well. Transit is
-time-sensitive, so routes are refreshed after 10:00 and borderline routes
+time-sensitive, so routes are refreshed after the configured local refresh hour and borderline routes
 should be checked again at the intended departure time.
 
 Transit results are keyed by exact worksite address (or verified coordinates),
 not recruit number, so reposts and same-site jobs share a lookup. New worksites
-are checked immediately. Existing routes are refreshed once per day after
-10:00 local time and must also be less than 24 hours old; set
-`--route-refresh-hour` or `--route-cache-hours` to change that policy. A broad
+are checked immediately. Existing route refresh hour and maximum cache age come
+from `[commute]` and can be overridden once with `--route-refresh-hour` or
+`--route-cache-hours`. A broad
 district label without an exact address is never shared between jobs. Changing
 the configured origin automatically invalidates all prior routes; a cutoff-only
 reclassification is refused until the routes have been recomputed from the new
@@ -525,11 +565,27 @@ python3 tools/albamon_transit.py \
 ```
 
 The unified application ranking is strict pay-first and exact-commute-second.
-Mixed salary units are converted to a comparable hourly amount using the
-displayed paid shift hours. A lower-paying job cannot move above a higher-paying
-job because of commute or fit; commute is the first tie-break only when reliable
-comparable pay is equal. Schedule certainty, short duration, hard requirements,
-and application friction remain visible as diagnostic fit scores and cautions.
+Mixed salary units are converted to a reliable **work-hour equivalent** only
+when the posting supplies enough shift evidence. Daily pay is divided by the
+displayed shift span minus an explicitly stated break; monthly pay requires a
+stated weekly schedule. Unknown daily, weekly, or monthly hours are never filled
+with an assumed 8-, 40-, or 209-hour value: those jobs retain their advertised
+pay, are labelled unverified, and are excluded from pay ranking and Pareto
+membership. A lower-paying job cannot move above a higher-paying job because of
+commute or fit; commute is the first tie-break only when reliable comparable pay
+is equal. Schedule certainty, short duration, hard requirements, and application
+friction remain visible as diagnostic fit scores and cautions.
+
+The dashboard also shows a separate **door-to-door hourly rate** when both fixed
+shift earnings and the full scheduled span are known:
+
+`fixed shift earnings / (scheduled shift span + 2 x verified one-way commute)`
+
+This is a personal time-efficiency metric, not the advertised wage. It is not
+used as the Pareto pay axis because that chart already uses commute as its other
+axis; using it there would count the same commute penalty twice. Hourly offers
+without a reliable paid duration do not receive an invented shift total or
+door-to-door rate.
 Where the structured salary is only a headline maximum, an employer-detail
 review can override it with the rate applicable to the weekend role; the report
 shows the conversion basis and caution rather than silently comparing unlike
@@ -560,16 +616,14 @@ filters, so no code edit is normally needed.
 Albamon 맞춤알바 condition. It uses read-only public endpoints and does not need
 browser cookies or account credentials.
 
-Current saved condition:
-
-- Title: `맞춤조건 1`
-- `suitNo`: `35138482`
+Set `albamon.saved_search_id` in the ignored local configuration before using
+the saved-search source. The public default is zero and fails closed with a
+setup message rather than exposing or using somebody else's saved search.
 
 Run the current Saturday-and-Sunday-only check:
 
 ```bash
 python3 tools/albamon_jobs.py \
-  --suit-no 35138482 \
   --strict-weekdays \
   --sat-sun-only \
   --exclude-stale \

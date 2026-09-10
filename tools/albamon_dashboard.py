@@ -28,7 +28,10 @@ try:
     from tools import albamon_application_messages as application_messages
     from tools.albamon_pareto import annotate_pareto_frontier
     from tools.albamon_runtime import atomic_write_text, exclusive_file_lock
-    from tools.dashboard_operations import OperationRegistry
+    from tools.dashboard_operations import (
+        OperationCapacityError,
+        OperationRegistry,
+    )
     from tools.albamon_transit import (
         DEFAULT_KAKAO_QUOTA_STATE,
         DEFAULT_WORKERS,
@@ -44,6 +47,7 @@ try:
         validate_commute_origin,
     )
     from tools.albamon_discord import notification_identity, validate_report_pair
+    from tools.jobscout_config import SETTINGS
     from tools.weekend_agencies.agencies import (
         hotel_agency_catalog_payload,
         hotel_agency_source_coverage_payload,
@@ -63,7 +67,7 @@ except ModuleNotFoundError:  # Support ``python3 tools/albamon_dashboard.py``.
     import albamon_application_messages as application_messages
     from albamon_pareto import annotate_pareto_frontier
     from albamon_runtime import atomic_write_text, exclusive_file_lock
-    from dashboard_operations import OperationRegistry
+    from dashboard_operations import OperationCapacityError, OperationRegistry
     from albamon_transit import (
         DEFAULT_KAKAO_QUOTA_STATE,
         DEFAULT_WORKERS,
@@ -79,6 +83,7 @@ except ModuleNotFoundError:  # Support ``python3 tools/albamon_dashboard.py``.
         validate_commute_origin,
     )
     from albamon_discord import notification_identity, validate_report_pair
+    from jobscout_config import SETTINGS
     from weekend_agencies.agencies import (
         hotel_agency_catalog_payload,
         hotel_agency_source_coverage_payload,
@@ -111,12 +116,12 @@ WEEKEND_AGENCY_EXPLORE_ROOT = ROOT / "artifacts/weekend-agencies/explore"
 WEEKEND_AGENCY_EXPLORE_RUNS = WEEKEND_AGENCY_EXPLORE_ROOT / "runs"
 WEEKEND_AGENCY_EXPLORE_CACHES = WEEKEND_AGENCY_EXPLORE_ROOT / "cache"
 WEEKEND_AGENCY_EXPLORE_INDEX = WEEKEND_AGENCY_EXPLORE_ROOT / "index.json"
-MAX_HOTEL_EXPLORATION_RUNS = 32
-HOTEL_EXPLORATION_CACHE_HOURS = 4
-MAX_HOTEL_EXPLORATION_DAYS = 31
+MAX_HOTEL_EXPLORATION_RUNS = SETTINGS.dashboard.maximum_exploration_runs
+HOTEL_EXPLORATION_CACHE_HOURS = SETTINGS.dashboard.exploration_cache_hours
+MAX_HOTEL_EXPLORATION_DAYS = SETTINGS.dashboard.maximum_exploration_days
 ENV_FILE = ROOT / ".env"
 ALBAMON_REFRESH_LOCK = ROOT / "artifacts/albamon/cache/refresh.lock"
-NEW_WINDOW_HOURS = 24
+NEW_WINDOW_HOURS = SETTINGS.dashboard.new_match_window_hours
 CAPITAL_REGION_LATITUDE_BOUNDS = (36.8, 38.3)
 CAPITAL_REGION_LONGITUDE_BOUNDS = (125.8, 128.3)
 REPORT_NAMES = {
@@ -167,6 +172,15 @@ SUMMARY_JOB_FIELDS = (
     "salary_type",
     "salary",
     "comparable_hourly_pay",
+    "work_hourly_pay",
+    "pay_comparison_reliable",
+    "pay_comparison_basis",
+    "estimated_shift_earnings_won",
+    "paid_shift_hours",
+    "shift_span_hours",
+    "door_to_door_hourly_pay",
+    "total_time_commitment_minutes",
+    "door_to_door_pay_basis",
     "work_days",
     "work_time",
     "work_time_option",
@@ -306,7 +320,7 @@ def _weekend_evidence_type(record: dict[str, Any]) -> str:
         return "remote"
     if "songpa_late_night" in lanes and "weekend_short_term" not in lanes:
         return "late_night"
-    if "aug_15_17_single_day" in lanes and "weekend_short_term" not in lanes:
+    if {"temporary_single_day", "aug_15_17_single_day"} & lanes and "weekend_short_term" not in lanes:
         return "target_date"
     basis = str(record.get("weekend_compatibility_basis") or "").lower()
     work_days = str(record.get("work_days") or "")
@@ -888,7 +902,9 @@ def _exploration_signature(
         "search_dates": [value.isoformat() for value in sorted(set(search_dates))],
         "origin": route_origin,
         "weekends_only": False,
-        "minimum_actual_hourly_won": 12_000,
+        "minimum_actual_hourly_won": (
+            SETTINGS.weekend_agencies.minimum_actual_hourly_won
+        ),
     }
     encoded = json.dumps(material, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:24]
@@ -1699,6 +1715,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 result = resolve_origin_address(payload)
             else:
                 result = start_commute_origin_update(payload)
+        except OperationCapacityError as exc:
+            self._send_json(
+                {"error": str(exc)}, HTTPStatus.SERVICE_UNAVAILABLE
+            )
+            return
         except (
             DashboardDataError,
             json.JSONDecodeError,

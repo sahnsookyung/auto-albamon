@@ -14,8 +14,10 @@ from zoneinfo import ZoneInfo
 
 try:
     from tools.albamon_runtime import atomic_write_text
+    from tools.jobscout_config import SETTINGS
 except ModuleNotFoundError:  # Direct CLI execution via tools/.
     from albamon_runtime import atomic_write_text
+    from jobscout_config import SETTINGS
 
 from .agencies import (
     hotel_agency_catalog_payload,
@@ -28,7 +30,7 @@ from .config import (
     SEARCH_DATES,
     SEARCH_END,
 )
-from .http import HttpClient
+from .http import HttpClient, SourceFetchError
 from .models import JobOffer
 from .models import PayBreakdown
 from .normalize import aggregate_offers, offer_is_actionable
@@ -50,7 +52,7 @@ class PipelineError(RuntimeError):
     pass
 
 
-SOURCE_SNAPSHOT_MAX_AGE_HOURS = 8
+SOURCE_SNAPSHOT_MAX_AGE_HOURS = SETTINGS.cache.weekend_agency_snapshot_hours
 PipelineProgress = Callable[[str, int, int, dict[str, Any]], None]
 
 
@@ -61,12 +63,16 @@ def _no_progress(
 
 
 def default_sources() -> tuple[object, ...]:
-    return (
-        WithYouSource(),
-        HupluxSource(),
-        EumplusSource(),
-        EoullimSource(),
-        RutineSource(),
+    catalog = {
+        "withyou": WithYouSource,
+        "huplux": HupluxSource,
+        "eumplus": EumplusSource,
+        "eoullim": EoullimSource,
+        "rutine": RutineSource,
+    }
+    return tuple(
+        catalog[source_name]()
+        for source_name in SETTINGS.weekend_agencies.enabled_sources
     )
 
 
@@ -304,6 +310,9 @@ def _collect_sources(
                 else fetch(client)
             )
         except Exception as exc:
+            safe_failure_reason = (
+                str(exc) if isinstance(exc, SourceFetchError) else type(exc).__name__
+            )
             offers, snapshot_checked_at, snapshot_available = _snapshot_offers(
                 source_snapshots,
                 source_name,
@@ -323,7 +332,7 @@ def _collect_sources(
                     now=now,
                 )
             if not snapshot_available:
-                failures[source_name] = type(exc).__name__
+                failures[source_name] = safe_failure_reason
                 continue
             offers = [
                 replace(
@@ -337,6 +346,7 @@ def _collect_sources(
                 "fetched_offer_count": len(offers),
                 "elapsed_seconds": round(time.monotonic() - source_started, 3),
                 "failure_type": type(exc).__name__,
+                "failure_reason": safe_failure_reason,
                 "snapshot_max_age_hours": SOURCE_SNAPSHOT_MAX_AGE_HOURS,
                 "snapshot_checked_at": snapshot_checked_at,
             }
@@ -386,7 +396,9 @@ def _collect_sources(
             + "\n",
         )
     if failures:
-        names = ", ".join(sorted(failures))
+        names = ", ".join(
+            f"{name} ({failures[name]})" for name in sorted(failures)
+        )
         raise PipelineError(
             f"source refresh failed for {names}; previous complete report was preserved"
         )

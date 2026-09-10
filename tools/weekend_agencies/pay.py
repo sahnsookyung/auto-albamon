@@ -96,6 +96,7 @@ def parse_huplux_pay(text: str, start: str, end: str) -> PayBreakdown:
                 text,
                 "daily_pay_without_reliable_shift_duration",
                 pay_frequency="daily",
+                advertised_shift_won=values[0],
             )
         actual = int((Decimal(values[0]) / duration).quantize(Decimal("1"), ROUND_HALF_UP))
         return PayBreakdown(
@@ -104,6 +105,7 @@ def parse_huplux_pay(text: str, start: str, end: str) -> PayBreakdown:
             text,
             "derived_from_daily_pay_and_scheduled_hours",
             pay_frequency="daily",
+            advertised_shift_won=values[0],
             warnings=("break time is not stated; hourly equivalent uses scheduled hours",),
         )
 

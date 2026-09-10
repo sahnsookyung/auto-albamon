@@ -1,0 +1,15 @@
+# Copy to config/jobscout.local.toml and override only values you want to change.
+# Nested tables are merged with config/jobscout.toml. Do not put secrets here.
+
+[albamon]
+# Replace this example number with your own Albamon saved-search number.
+saved_search_id = 12345678
+availability_end_date = 2026-12-31
+
+[weekend_agencies]
+search_start = 2026-12-05
+search_end = 2026-12-27
+minimum_actual_hourly_won = 13000
+
+[commute]
+base_limit_minutes = 45
